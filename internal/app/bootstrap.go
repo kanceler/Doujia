@@ -12,6 +12,7 @@ import (
 	"devflow/internal/pipeline"
 	"devflow/internal/runtime"
 	"devflow/internal/state/repo"
+	"fmt"
 )
 
 type Modules struct {
@@ -45,15 +46,35 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 				WorkspaceRoot: init.WorkspacePath,
 			}, nil
 		},
-		LLMClientFactory: func(runtime.AgentInit) (llm.Client, error) {
-			cfg, ok, err := llm.LoadOptionalConfigFromEnv()
-			if err != nil {
-				return nil, err
-			}
-			if !ok {
+		LLMClientFactory: func(init runtime.AgentInit) (llm.Client, error) {
+			cfg := init.RunConfig.LLM
+			switch llm.ProviderType(cfg.ProviderType) {
+			case llm.ProviderTypeNoop:
 				return llm.NoopClient{}, nil
+			case llm.ProviderTypeOpenAICompatible:
+				clientCfg := llm.Config{
+					ProviderType:   llm.ProviderTypeOpenAICompatible,
+					BaseURL:        cfg.BaseURL,
+					APIKey:         cfg.APIKey,
+					Model:          cfg.Model,
+					RequestTimeout: cfg.RequestTimeout,
+				}
+				if clientCfg.BaseURL == "" {
+					clientCfg.BaseURL = llm.DefaultBaseURL
+				}
+				if clientCfg.APIKey == "" {
+					return nil, fmt.Errorf("run %q is missing llm api key", init.RunID)
+				}
+				if clientCfg.Model == "" {
+					return nil, fmt.Errorf("run %q is missing llm model", init.RunID)
+				}
+				if clientCfg.RequestTimeout <= 0 {
+					clientCfg.RequestTimeout = llm.DefaultRequestTimeout
+				}
+				return llm.BuildClient(clientCfg)
+			default:
+				return nil, fmt.Errorf("run %q has unsupported llm provider type %q", init.RunID, cfg.ProviderType)
 			}
-			return llm.BuildClient(cfg)
 		},
 		Logger: runLogger,
 	}
@@ -62,8 +83,9 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 	taskRuntime := runtime.NewTaskRuntime(4, nil, runLogger, agentConfig)
 	messageGateway := runtime.NewMessageGateway(taskRuntime, runLogger)
 	taskRuntime.SetBinder(messageGateway)
-	orch := orchestrator.NewService(pipelineRegistry, runRepo, taskRepo, taskRuntime, messageGateway, runLogger)
+	orch := orchestrator.NewService(pipelineRegistry, runRepo, taskRepo, taskRuntime, messageGateway, sessionRuntime, runLogger)
 	taskRuntime.SetFeedbackSink(orch)
+	sessionRuntime.SetFeedbackSink(orch)
 
 	pmFactory := pmagent.NewFactory()
 	architectFactory := architectagent.NewFactory()

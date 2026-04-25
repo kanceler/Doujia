@@ -13,7 +13,7 @@ type RunRepository interface {
 
 type TaskRepository interface {
 	Create(ctx context.Context, task TaskRecord) error
-	Get(ctx context.Context, taskID core.TaskID) (TaskRecord, error)
+	Get(ctx context.Context, runID core.RunID, taskID core.TaskID) (TaskRecord, error)
 	Update(ctx context.Context, task TaskRecord) error
 	ListByRun(ctx context.Context, runID core.RunID) ([]TaskRecord, error)
 }

@@ -82,12 +82,25 @@ type TaskMetaData struct {
 	Control      []Control      `json:"control,omitempty"`
 }
 
+type RunConfig struct {
+	LLM LLMConfig
+}
+
+type LLMConfig struct {
+	ProviderType   string
+	BaseURL        string
+	APIKey         string
+	Model          string
+	RequestTimeout time.Duration
+}
+
 type PipelineRun struct {
 	ID          RunID
 	PipelineID  PipelineID
 	Status      RunStatus
 	ProjectDir  string
 	SessionID   SessionID
+	Config      RunConfig
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }

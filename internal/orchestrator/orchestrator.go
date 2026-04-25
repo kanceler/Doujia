@@ -12,12 +12,13 @@ import (
 )
 
 type Service struct {
-	pipelines  pipeline.Registry
-	runs       repo.RunRepository
-	tasks      repo.TaskRepository
-	provision  runtime.AgentProvisioner
-	dispatcher runtime.Dispatcher
-	logger     logging.RunLogger
+	pipelines         pipeline.Registry
+	runs              repo.RunRepository
+	tasks             repo.TaskRepository
+	provision         runtime.AgentProvisioner
+	dispatcher        runtime.Dispatcher
+	sessionDispatcher runtime.SessionRuntime
+	logger            logging.RunLogger
 }
 
 func NewService(
@@ -26,15 +27,17 @@ func NewService(
 	tasks repo.TaskRepository,
 	provision runtime.AgentProvisioner,
 	dispatcher runtime.Dispatcher,
+	sessionDispatcher runtime.SessionRuntime,
 	logger logging.RunLogger,
 ) *Service {
 	return &Service{
-		pipelines:  pipelines,
-		runs:       runs,
-		tasks:      tasks,
-		provision:  provision,
-		dispatcher: dispatcher,
-		logger:     logger,
+		pipelines:         pipelines,
+		runs:              runs,
+		tasks:             tasks,
+		provision:         provision,
+		dispatcher:        dispatcher,
+		sessionDispatcher: sessionDispatcher,
+		logger:            logger,
 	}
 }
 
@@ -74,11 +77,15 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 		_ = s.logger.LogTaskMeta(feedback.RunID, "Orchestrator", "feedback received", feedback)
 	}
 
-	task, err := s.tasks.Get(ctx, feedback.TaskID)
+	task, err := s.tasks.Get(ctx, feedback.RunID, feedback.TaskID)
 	if err != nil {
 		return err
 	}
-	task.Status = core.TaskStatusDone
+	if feedback.Result == core.TaskResultCodeFail {
+		task.Status = core.TaskStatusFailed
+	} else {
+		task.Status = core.TaskStatusDone
+	}
 	task.OutputArtifactRefs = toArtifactRefs(feedback.ArtifactURIs)
 	task.UpdatedAt = time.Now().UTC()
 	if err := s.tasks.Update(ctx, task); err != nil {
@@ -88,6 +95,14 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 	run, err := s.runs.Get(ctx, task.RunID)
 	if err != nil {
 		return err
+	}
+	if feedback.Result == core.TaskResultCodeFail {
+		run.Status = core.RunStatusFailed
+		run.UpdatedAt = time.Now().UTC()
+		if s.logger != nil {
+			_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("run failed on task=%s", task.ID))
+		}
+		return s.runs.Update(ctx, run)
 	}
 	spec, err := s.pipelines.Get(ctx, run.PipelineID)
 	if err != nil {
@@ -127,18 +142,11 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 		return s.tasks.Create(ctx, nextTask)
 	}
 
-	if _, err := s.provision.EnsureAgent(ctx, runtime.EnsureAgentRequest{
-		RunID:       run.ID,
-		Role:        nextStage.AgentRole,
-		AgentID:     nextStage.AgentAlias,
-		ProjectRoot: run.ProjectDir,
-	}); err != nil {
-		return err
-	}
 	nextTask.Status = core.TaskStatusDispatched
 	if err := s.tasks.Create(ctx, nextTask); err != nil {
 		return err
 	}
+
 	dispatch := core.TaskMetaData{
 		Direction:    core.TaskDirectionDispatch,
 		RunID:        run.ID,
@@ -150,6 +158,20 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 	}
 	if s.logger != nil {
 		_ = s.logger.LogTaskMeta(run.ID, "Orchestrator", "dispatch created", dispatch)
+	}
+
+	if nextStage.AgentRole == core.AgentRoleCEO && s.sessionDispatcher != nil {
+		return s.sessionDispatcher.DispatchToSession(ctx, dispatch)
+	}
+
+	if _, err := s.provision.EnsureAgent(ctx, runtime.EnsureAgentRequest{
+		RunID:       run.ID,
+		Role:        nextStage.AgentRole,
+		AgentID:     nextStage.AgentAlias,
+		ProjectRoot: run.ProjectDir,
+		RunConfig:   run.Config,
+	}); err != nil {
+		return err
 	}
 	return s.dispatcher.Dispatch(ctx, dispatch)
 }
