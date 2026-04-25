@@ -28,13 +28,15 @@ type InMemorySessionRuntime struct {
 	byRunID    map[core.RunID]Session
 	ceoFactory Agent
 	logger     logging.RunLogger
+	config     AgentRuntimeConfig
 }
 
-func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger) *InMemorySessionRuntime {
+func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger, config AgentRuntimeConfig) *InMemorySessionRuntime {
 	return &InMemorySessionRuntime{
 		byRunID:    make(map[core.RunID]Session),
 		ceoFactory: ceoFactory,
 		logger:     logger,
+		config:     config,
 	}
 }
 
@@ -53,13 +55,19 @@ func (r *InMemorySessionRuntime) CreateSession(_ context.Context, runID core.Run
 		RunID:         runID,
 		CEOAgent:      "ceo",
 		WorkspacePath: workspacePath,
-		Agent: r.ceoFactory.Create(AgentInit{
-			AgentID:       "ceo",
-			RuntimeID:     core.RuntimeID(fmt.Sprintf("%s_ceo_runtime", runID)),
-			RunID:         runID,
-			WorkspacePath: workspacePath,
-		}),
 	}
+	init := AgentInit{
+		AgentID:       "ceo",
+		RuntimeID:     core.RuntimeID(fmt.Sprintf("%s_ceo_runtime", runID)),
+		RunID:         runID,
+		RunRoot:       projectRoot,
+		WorkspacePath: workspacePath,
+	}
+	deps, err := buildAgentDeps(init, r.config)
+	if err != nil {
+		return Session{}, err
+	}
+	session.Agent = r.ceoFactory.Create(init, deps)
 	r.byRunID[runID] = session
 	if r.logger != nil {
 		_ = r.logger.Log(runID, "SessionRuntime", fmt.Sprintf("session created: session_id=%s workspace=%s", session.ID, session.WorkspacePath))

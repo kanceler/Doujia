@@ -5,6 +5,7 @@ import (
 	"devflow/internal/app"
 	"devflow/internal/core"
 	"os"
+	"path"
 	"path/filepath"
 	"testing"
 	"time"
@@ -49,7 +50,7 @@ func TestPhaseOneFlowWithExternalCEOFeedback(t *testing.T) {
 		RunID:     runID,
 		TaskID:    "task_01",
 		AgentID:   "ceo",
-		Op:        "0",
+		Op:        "ceo_write_requirement",
 	})
 	if err != nil {
 		t.Fatalf("task_01 execute error = %v", err)
@@ -68,18 +69,19 @@ func TestPhaseOneFlowWithExternalCEOFeedback(t *testing.T) {
 	}
 
 	waitForTaskStatus(t, ctx, bootstrap, "task_03", core.TaskStatusWaitingExternal)
-	pmPlan := filepath.Join(pmWorkspace, "artifacts", "plan", "plan_v1.md")
+	pmPlan := filepath.Join(pmWorkspace, "artifacts", "prd", "plan_v1.md")
 	if _, err := os.Stat(pmPlan); err != nil {
 		t.Fatalf("pm plan artifact should exist: %v", err)
 	}
+	pmPlanURI := path.Join("projects", string(runID), "agents", "pm01", "artifacts", "prd", "plan_v1.md")
 
 	feedback, err = session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction:    core.TaskDirectionDispatch,
 		RunID:        runID,
 		TaskID:       "task_03",
 		AgentID:      "ceo",
-		Op:           "1",
-		ArtifactURIs: []string{pmPlan},
+		Op:           "ceo_review_plan",
+		ArtifactURIs: []string{pmPlanURI},
 	})
 	if err != nil {
 		t.Fatalf("task_03 execute error = %v", err)
@@ -90,14 +92,18 @@ func TestPhaseOneFlowWithExternalCEOFeedback(t *testing.T) {
 
 	waitForTaskStatus(t, ctx, bootstrap, "task_06", core.TaskStatusWaitingExternal)
 
-	architectDesign := filepath.Join(run.ProjectDir, "agents", "architect01", "artifacts", "architecture", "architecture_v1.md")
+	architectDesign := filepath.Join(run.ProjectDir, "agents", "architect01", "artifacts", "design", "architecture_v1.md")
+	if _, err := os.Stat(architectDesign); err != nil {
+		t.Fatalf("architect design artifact should exist: %v", err)
+	}
+	architectDesignURI := path.Join("projects", string(runID), "agents", "architect01", "artifacts", "design", "architecture_v1.md")
 	feedback, err = session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction:    core.TaskDirectionDispatch,
 		RunID:        runID,
 		TaskID:       "task_06",
 		AgentID:      "ceo",
-		Op:           "1",
-		ArtifactURIs: []string{architectDesign},
+		Op:           "ceo_user_confirm",
+		ArtifactURIs: []string{architectDesignURI},
 	})
 	if err != nil {
 		t.Fatalf("task_06 execute error = %v", err)
@@ -117,7 +123,7 @@ func TestPhaseOneFlowWithExternalCEOFeedback(t *testing.T) {
 
 func waitForTaskStatus(t *testing.T, ctx context.Context, bootstrap *app.Bootstrap, taskID core.TaskID, want core.TaskStatus) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(testWaitTimeout())
 	for time.Now().Before(deadline) {
 		task, err := bootstrap.Internals.TaskRepository.Get(ctx, taskID)
 		if err == nil && task.Status == want {
@@ -130,4 +136,17 @@ func waitForTaskStatus(t *testing.T, ctx context.Context, bootstrap *app.Bootstr
 		t.Fatalf("Get(%s) error = %v", taskID, err)
 	}
 	t.Fatalf("task %s status = %s, want %s", taskID, task.Status, want)
+}
+
+func testWaitTimeout() time.Duration {
+	if hasLLMTestConfig() {
+		return 120 * time.Second
+	}
+	return 2 * time.Second
+}
+
+func hasLLMTestConfig() bool {
+	return os.Getenv("LLM_PROVIDER") != "" ||
+		os.Getenv("LLM_API_KEY") != "" ||
+		os.Getenv("LLM_MODEL") != ""
 }
