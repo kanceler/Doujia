@@ -28,7 +28,7 @@ func BuiltinPhaseOne() PipelineSpec {
 				Name:       "PM Write Plan",
 				AgentRole:  core.AgentRolePM,
 				AgentAlias: "pm01",
-				Op:         "0",
+				Op:         "pm_write_plan",
 				DependsOn:  &task02Depends,
 			},
 			{
@@ -45,7 +45,7 @@ func BuiltinPhaseOne() PipelineSpec {
 				Name:       "Architect Write Design",
 				AgentRole:  core.AgentRoleArchitect,
 				AgentAlias: "architect01",
-				Op:         "0",
+				Op:         "architecture_generation",
 				DependsOn:  &task04Depends,
 			},
 			{
@@ -53,7 +53,7 @@ func BuiltinPhaseOne() PipelineSpec {
 				Name:       "PM Review Design",
 				AgentRole:  core.AgentRolePM,
 				AgentAlias: "pm01",
-				Op:         "1",
+				Op:         "pm_review_design",
 				DependsOn:  &task05Depends,
 			},
 			{

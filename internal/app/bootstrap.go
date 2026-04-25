@@ -1,7 +1,12 @@
 package app
 
 import (
+	architectagent "devflow/internal/agent/architect"
+	ceoagent "devflow/internal/agent/ceo"
+	pmagent "devflow/internal/agent/pm"
+	"devflow/internal/artifact"
 	"devflow/internal/core"
+	"devflow/internal/llm"
 	"devflow/internal/logging"
 	"devflow/internal/orchestrator"
 	"devflow/internal/pipeline"
@@ -33,16 +38,35 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
 	runLogger := logging.NewFileRunLogger(projectsRoot)
-	sessionRuntime := runtime.NewInMemorySessionRuntime(runtime.NewCEOAgentFactory(), runLogger)
+	agentConfig := runtime.AgentRuntimeConfig{
+		ArtifactStoreFactory: func(init runtime.AgentInit) (artifact.Store, error) {
+			return &artifact.ScopedLocalStore{
+				RunRoot:       init.RunRoot,
+				WorkspaceRoot: init.WorkspacePath,
+			}, nil
+		},
+		LLMClientFactory: func(runtime.AgentInit) (llm.Client, error) {
+			cfg, ok, err := llm.LoadOptionalConfigFromEnv()
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return llm.NoopClient{}, nil
+			}
+			return llm.BuildClient(cfg)
+		},
+		Logger: runLogger,
+	}
+	sessionRuntime := runtime.NewInMemorySessionRuntime(ceoagent.NewFactory(), runLogger, agentConfig)
 
-	taskRuntime := runtime.NewTaskRuntime(4, nil, runLogger)
+	taskRuntime := runtime.NewTaskRuntime(4, nil, runLogger, agentConfig)
 	messageGateway := runtime.NewMessageGateway(taskRuntime, runLogger)
 	taskRuntime.SetBinder(messageGateway)
 	orch := orchestrator.NewService(pipelineRegistry, runRepo, taskRepo, taskRuntime, messageGateway, runLogger)
 	taskRuntime.SetFeedbackSink(orch)
 
-	pmFactory := runtime.NewPMAgentFactory()
-	architectFactory := runtime.NewArchitectAgentFactory()
+	pmFactory := pmagent.NewFactory()
+	architectFactory := architectagent.NewFactory()
 	taskRuntime.RegisterTemplate(core.AgentRolePM, pmFactory)
 	taskRuntime.RegisterTemplate(core.AgentRoleArchitect, architectFactory)
 

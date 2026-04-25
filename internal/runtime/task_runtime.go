@@ -55,9 +55,10 @@ type TaskRuntime struct {
 	binder       Binder
 	nextID       int
 	logger       logging.RunLogger
+	config       AgentRuntimeConfig
 }
 
-func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger) *TaskRuntime {
+func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger, config AgentRuntimeConfig) *TaskRuntime {
 	tr := &TaskRuntime{
 		factories:  make(map[core.AgentRole]Agent),
 		instances:  make(map[core.RuntimeID]agentInstance),
@@ -65,6 +66,7 @@ func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger
 		queue:      make(chan queuedTask, 128),
 		sink:       sink,
 		logger:     logger,
+		config:     config,
 	}
 	for i := 0; i < workerCount; i++ {
 		go tr.worker()
@@ -112,13 +114,20 @@ func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (
 		agentID:       req.AgentID,
 		runtimeID:     runtimeID,
 		workspacePath: workspacePath,
-		agent: template.Create(AgentInit{
-			AgentID:       req.AgentID,
-			RuntimeID:     runtimeID,
-			RunID:         req.RunID,
-			WorkspacePath: workspacePath,
-		}),
 	}
+	init := AgentInit{
+		AgentID:       req.AgentID,
+		RuntimeID:     runtimeID,
+		RunID:         req.RunID,
+		RunRoot:       req.ProjectRoot,
+		WorkspacePath: workspacePath,
+	}
+	deps, err := buildAgentDeps(init, r.config)
+	if err != nil {
+		r.mu.Unlock()
+		return EnsureAgentResult{}, err
+	}
+	instance.agent = template.Create(init, deps)
 	r.instances[runtimeID] = instance
 	r.agentIndex[req.AgentID] = runtimeID
 	r.mu.Unlock()
