@@ -18,6 +18,7 @@ type AgentInit struct {
 	RuntimeID     core.RuntimeID
 	RunID         core.RunID
 	RunRoot       string
+	RunConfig     core.RunConfig
 	WorkspacePath string
 	TaskHistory   []core.TaskMetaData
 }

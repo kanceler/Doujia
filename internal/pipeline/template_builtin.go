@@ -38,7 +38,6 @@ func BuiltinPhaseOne() PipelineSpec {
 				AgentAlias: "ceo",
 				Op:         "ceo_review_plan",
 				DependsOn:  &task03Depends,
-				External:   true,
 			},
 			{
 				ID:         "task_04",
@@ -63,7 +62,6 @@ func BuiltinPhaseOne() PipelineSpec {
 				AgentAlias: "ceo",
 				Op:         "ceo_user_confirm",
 				DependsOn:  &task06Depends,
-				External:   true,
 			},
 		},
 	}

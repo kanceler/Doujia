@@ -19,6 +19,7 @@ type EnsureAgentRequest struct {
 	Role        core.AgentRole
 	AgentID     core.AgentID
 	ProjectRoot string
+	RunConfig   core.RunConfig
 }
 
 type EnsureAgentResult struct {
@@ -49,7 +50,7 @@ type TaskRuntime struct {
 	mu           sync.RWMutex
 	factories    map[core.AgentRole]Agent
 	instances    map[core.RuntimeID]agentInstance
-	agentIndex   map[core.AgentID]core.RuntimeID
+	agentIndex   map[agentRuntimeKey]core.RuntimeID
 	queue        chan queuedTask
 	sink         FeedbackSink
 	binder       Binder
@@ -62,7 +63,7 @@ func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger
 	tr := &TaskRuntime{
 		factories:  make(map[core.AgentRole]Agent),
 		instances:  make(map[core.RuntimeID]agentInstance),
-		agentIndex: make(map[core.AgentID]core.RuntimeID),
+		agentIndex: make(map[agentRuntimeKey]core.RuntimeID),
 		queue:      make(chan queuedTask, 128),
 		sink:       sink,
 		logger:     logger,
@@ -90,7 +91,8 @@ func (r *TaskRuntime) RegisterTemplate(role core.AgentRole, factory Agent) {
 
 func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (EnsureAgentResult, error) {
 	r.mu.Lock()
-	if runtimeID, ok := r.agentIndex[req.AgentID]; ok {
+	key := newAgentRuntimeKey(req.RunID, req.AgentID)
+	if runtimeID, ok := r.agentIndex[key]; ok {
 		r.mu.Unlock()
 		return EnsureAgentResult{AgentID: req.AgentID, RuntimeID: runtimeID}, nil
 	}
@@ -120,6 +122,7 @@ func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (
 		RuntimeID:     runtimeID,
 		RunID:         req.RunID,
 		RunRoot:       req.ProjectRoot,
+		RunConfig:     req.RunConfig,
 		WorkspacePath: workspacePath,
 	}
 	deps, err := buildAgentDeps(init, r.config)
@@ -129,11 +132,11 @@ func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (
 	}
 	instance.agent = template.Create(init, deps)
 	r.instances[runtimeID] = instance
-	r.agentIndex[req.AgentID] = runtimeID
+	r.agentIndex[key] = runtimeID
 	r.mu.Unlock()
 
 	if r.binder != nil {
-		if err := r.binder.Bind(ctx, req.AgentID, runtimeID); err != nil {
+		if err := r.binder.Bind(ctx, req.RunID, req.AgentID, runtimeID); err != nil {
 			return EnsureAgentResult{}, err
 		}
 	}

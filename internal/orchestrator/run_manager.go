@@ -40,7 +40,7 @@ func NewRunManager(
 	}
 }
 
-func (m *RunManager) CreateRun(ctx context.Context, runID core.RunID, pipelineID core.PipelineID) error {
+func (m *RunManager) CreateRun(ctx context.Context, runID core.RunID, pipelineID core.PipelineID, config core.RunConfig) error {
 	if _, err := m.pipelines.Get(ctx, pipelineID); err != nil {
 		return err
 	}
@@ -54,6 +54,7 @@ func (m *RunManager) CreateRun(ctx context.Context, runID core.RunID, pipelineID
 		PipelineID: pipelineID,
 		Status:     core.RunStatusCreated,
 		ProjectDir: projectDir,
+		Config:     config,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	})
@@ -68,7 +69,7 @@ func (m *RunManager) StartRun(ctx context.Context, runID core.RunID) error {
 	if err != nil {
 		return err
 	}
-	session, err := m.sessions.CreateSession(ctx, runID, run.ProjectDir)
+	session, err := m.sessions.CreateSession(ctx, run)
 	if err != nil {
 		return err
 	}

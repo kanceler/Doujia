@@ -48,29 +48,30 @@ func (r *MemoryRunRepository) Update(_ context.Context, run RunRecord) error {
 
 type MemoryTaskRepository struct {
 	mu    sync.RWMutex
-	tasks map[core.TaskID]TaskRecord
+	tasks map[taskKey]TaskRecord
 }
 
 func NewMemoryTaskRepository() *MemoryTaskRepository {
-	return &MemoryTaskRepository{tasks: make(map[core.TaskID]TaskRecord)}
+	return &MemoryTaskRepository{tasks: make(map[taskKey]TaskRecord)}
 }
 
 func (r *MemoryTaskRepository) Create(_ context.Context, task TaskRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.tasks[task.ID]; exists {
-		return fmt.Errorf("task %q already exists", task.ID)
+	key := newTaskKey(task.RunID, task.ID)
+	if _, exists := r.tasks[key]; exists {
+		return fmt.Errorf("task %q already exists in run %q", task.ID, task.RunID)
 	}
-	r.tasks[task.ID] = task
+	r.tasks[key] = task
 	return nil
 }
 
-func (r *MemoryTaskRepository) Get(_ context.Context, taskID core.TaskID) (TaskRecord, error) {
+func (r *MemoryTaskRepository) Get(_ context.Context, runID core.RunID, taskID core.TaskID) (TaskRecord, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	task, ok := r.tasks[taskID]
+	task, ok := r.tasks[newTaskKey(runID, taskID)]
 	if !ok {
-		return TaskRecord{}, fmt.Errorf("task %q not found", taskID)
+		return TaskRecord{}, fmt.Errorf("task %q not found in run %q", taskID, runID)
 	}
 	return task, nil
 }
@@ -78,10 +79,11 @@ func (r *MemoryTaskRepository) Get(_ context.Context, taskID core.TaskID) (TaskR
 func (r *MemoryTaskRepository) Update(_ context.Context, task TaskRecord) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.tasks[task.ID]; !exists {
-		return fmt.Errorf("task %q not found", task.ID)
+	key := newTaskKey(task.RunID, task.ID)
+	if _, exists := r.tasks[key]; !exists {
+		return fmt.Errorf("task %q not found in run %q", task.ID, task.RunID)
 	}
-	r.tasks[task.ID] = task
+	r.tasks[key] = task
 	return nil
 }
 
@@ -95,5 +97,14 @@ func (r *MemoryTaskRepository) ListByRun(_ context.Context, runID core.RunID) ([
 		}
 	}
 	return out, nil
+}
+
+type taskKey struct {
+	runID  core.RunID
+	taskID core.TaskID
+}
+
+func newTaskKey(runID core.RunID, taskID core.TaskID) taskKey {
+	return taskKey{runID: runID, taskID: taskID}
 }
 

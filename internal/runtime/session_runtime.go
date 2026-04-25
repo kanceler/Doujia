@@ -19,8 +19,9 @@ type Session struct {
 }
 
 type SessionRuntime interface {
-	CreateSession(ctx context.Context, runID core.RunID, projectRoot string) (Session, error)
+	CreateSession(ctx context.Context, run core.PipelineRun) (Session, error)
 	GetSessionByRun(ctx context.Context, runID core.RunID) (Session, error)
+	DispatchToSession(ctx context.Context, task core.TaskMetaData) error
 }
 
 type InMemorySessionRuntime struct {
@@ -29,6 +30,7 @@ type InMemorySessionRuntime struct {
 	ceoFactory Agent
 	logger     logging.RunLogger
 	config     AgentRuntimeConfig
+	sink       FeedbackSink
 }
 
 func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger, config AgentRuntimeConfig) *InMemorySessionRuntime {
@@ -40,12 +42,18 @@ func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger, confi
 	}
 }
 
-func (r *InMemorySessionRuntime) CreateSession(_ context.Context, runID core.RunID, projectRoot string) (Session, error) {
+func (r *InMemorySessionRuntime) SetFeedbackSink(sink FeedbackSink) {
+	r.sink = sink
+}
+
+func (r *InMemorySessionRuntime) CreateSession(_ context.Context, run core.PipelineRun) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	runID := run.ID
 	if existing, ok := r.byRunID[runID]; ok {
 		return existing, nil
 	}
+	projectRoot := run.ProjectDir
 	workspacePath := filepath.Join(projectRoot, "agents", "ceo")
 	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
 		return Session{}, err
@@ -61,6 +69,7 @@ func (r *InMemorySessionRuntime) CreateSession(_ context.Context, runID core.Run
 		RuntimeID:     core.RuntimeID(fmt.Sprintf("%s_ceo_runtime", runID)),
 		RunID:         runID,
 		RunRoot:       projectRoot,
+		RunConfig:     run.Config,
 		WorkspacePath: workspacePath,
 	}
 	deps, err := buildAgentDeps(init, r.config)
@@ -83,4 +92,31 @@ func (r *InMemorySessionRuntime) GetSessionByRun(_ context.Context, runID core.R
 		return Session{}, fmt.Errorf("session for run %q not found", runID)
 	}
 	return session, nil
+}
+
+func (r *InMemorySessionRuntime) DispatchToSession(ctx context.Context, task core.TaskMetaData) error {
+	session, err := r.GetSessionByRun(ctx, task.RunID)
+	if err != nil {
+		return err
+	}
+	if r.logger != nil {
+		_ = r.logger.LogTaskMeta(task.RunID, "SessionRuntime", "dispatch_to_session", task)
+	}
+	feedback, err := session.Agent.Execute(ctx, task)
+	if err != nil {
+		feedback = core.TaskMetaData{
+			Direction: core.TaskDirectionFeedback,
+			RunID:     task.RunID,
+			TaskID:    task.TaskID,
+			ParentID:  task.ParentID,
+			DependsOn: task.DependsOn,
+			AgentID:   session.CEOAgent,
+			Op:        task.Op,
+			Result:    core.TaskResultCodeFail,
+		}
+	}
+	if r.sink != nil {
+		return r.sink.OnFeedback(ctx, feedback)
+	}
+	return nil
 }
