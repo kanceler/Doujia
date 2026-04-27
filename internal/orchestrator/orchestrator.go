@@ -2,14 +2,15 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
+
 	"devflow/internal/core"
 	"devflow/internal/logging"
 	"devflow/internal/pipeline"
 	"devflow/internal/runtime"
 	"devflow/internal/state/repo"
-	"fmt"
-	"strings"
-	"time"
 )
 
 type Service struct {
@@ -99,6 +100,15 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 	case core.TaskResultCodeOK:
 		if len(feedback.Control) > 0 {
 			if err := validateControls(feedback.Control); err != nil {
+				task.Status = core.TaskStatusBlocked
+				task.OutputArtifactRefs = toArtifactRefs(feedback.ArtifactURIs)
+				task.UpdatedAt = time.Now().UTC()
+				if updateErr := s.tasks.Update(ctx, task); updateErr != nil {
+					return updateErr
+				}
+				return s.createResplitTask(ctx, run, task, feedback, err)
+			}
+			if _, err := pairControlsByModule(feedback.Control); err != nil {
 				task.Status = core.TaskStatusBlocked
 				task.OutputArtifactRefs = toArtifactRefs(feedback.ArtifactURIs)
 				task.UpdatedAt = time.Now().UTC()
@@ -209,7 +219,7 @@ func (s *Service) handleDynamicTaskFeedback(ctx context.Context, run core.Pipeli
 	if err := s.tasks.Update(ctx, task); err != nil {
 		return err
 	}
-	if feedback.Op == core.TaskOpTestCode {
+	if isGlobalTestTask(task, feedback) {
 		run.Status = core.RunStatusCompleted
 		run.UpdatedAt = time.Now().UTC()
 		if s.logger != nil {
@@ -217,97 +227,11 @@ func (s *Service) handleDynamicTaskFeedback(ctx context.Context, run core.Pipeli
 		}
 		return s.runs.Update(ctx, run)
 	}
-	if feedback.Op == core.TaskOpMergeCode {
-		return s.createGlobalTestTask(ctx, run, task, feedback.ArtifactURIs)
-	}
-	items, err := s.tasks.ListByRun(ctx, run.ID)
-	if err != nil {
-		return err
-	}
-	outputs := make([]string, 0)
-	for _, item := range items {
-		if item.ParentID != nil && task.ParentID != nil && *item.ParentID == *task.ParentID {
-			if item.ID == task.ID {
-				outputs = append(outputs, feedback.ArtifactURIs...)
-				continue
-			}
-			switch item.Status {
-			case core.TaskStatusPending, core.TaskStatusDispatched, core.TaskStatusRunning:
-				return nil
-			}
-			outputs = append(outputs, artifactRefsToStrings(item.OutputArtifactRefs)...)
-		}
-	}
-	if s.mergeTaskExists(items, task.ParentID) {
-		return nil
-	}
-	return s.createMergeTask(ctx, run, task, outputs)
+	return s.advanceReadyTasks(ctx, run)
 }
 
-func (s *Service) mergeTaskExists(items []core.Task, parentID *core.TaskID) bool {
-	if parentID == nil {
-		return false
-	}
-	for _, item := range items {
-		if item.ParentID != nil && *item.ParentID == *parentID && item.AgentRole == core.AgentRoleArchitect && strings.Contains(string(item.ID), "merge_code") {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Service) createMergeTask(ctx context.Context, run core.PipelineRun, completedTask core.Task, inputArtifacts []string) error {
-	if completedTask.ParentID == nil {
-		return fmt.Errorf("merge task requires a parent task")
-	}
-	parent, err := s.tasks.Get(ctx, run.ID, *completedTask.ParentID)
-	if err != nil {
-		return err
-	}
-	parentID := parent.ID
-	taskID := core.TaskID(fmt.Sprintf("%s_merge_code", parent.ID))
-	task := core.Task{
-		ID:                taskID,
-		RunID:             run.ID,
-		StageID:           core.StageID(taskID),
-		AgentRole:         core.AgentRoleArchitect,
-		AgentID:           parent.AgentID,
-		ParentID:          &parentID,
-		DependsOn:         &parentID,
-		Status:            core.TaskStatusPending,
-		InputArtifactRefs: toArtifactRefs(inputArtifacts),
-		CreatedAt:         time.Now().UTC(),
-		UpdatedAt:         time.Now().UTC(),
-	}
-	if s.logger != nil {
-		_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("merge_code task created: %s", taskID))
-	}
-	return s.dispatchTask(ctx, run, task, core.TaskOpMergeCode, inputArtifacts)
-}
-
-func (s *Service) createGlobalTestTask(ctx context.Context, run core.PipelineRun, mergeTask core.Task, inputArtifacts []string) error {
-	if mergeTask.ParentID == nil {
-		return fmt.Errorf("global test task requires a parent task")
-	}
-	parentID := *mergeTask.ParentID
-	taskID := core.TaskID(fmt.Sprintf("%s_global_test_code", parentID))
-	task := core.Task{
-		ID:                taskID,
-		RunID:             run.ID,
-		StageID:           core.StageID(taskID),
-		AgentRole:         core.AgentRoleArchitect,
-		AgentID:           mergeTask.AgentID,
-		ParentID:          &parentID,
-		DependsOn:         &mergeTask.ID,
-		Status:            core.TaskStatusPending,
-		InputArtifactRefs: toArtifactRefs(inputArtifacts),
-		CreatedAt:         time.Now().UTC(),
-		UpdatedAt:         time.Now().UTC(),
-	}
-	if s.logger != nil {
-		_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("global test_code task created: %s", taskID))
-	}
-	return s.dispatchTask(ctx, run, task, core.TaskOpTestCode, inputArtifacts)
+func isGlobalTestTask(task core.Task, feedback core.TaskMetaData) bool {
+	return feedback.Op == core.TaskOpTestCode && task.AgentRole == core.AgentRoleArchitect
 }
 
 func findNextStage(spec pipeline.PipelineSpec, current core.StageID) (pipeline.StageSpec, bool) {
@@ -413,7 +337,7 @@ func (s *Service) createResplitTask(ctx context.Context, run core.PipelineRun, t
 		return err
 	}
 	parentID := task.ID
-	inputArtifacts := append([]string(nil), feedback.ArtifactURIs...)
+	inputArtifacts := append(artifactRefsToStrings(task.InputArtifactRefs), feedback.ArtifactURIs...)
 	childTask := core.Task{
 		ID:                childID,
 		RunID:             run.ID,
@@ -433,28 +357,292 @@ func (s *Service) createResplitTask(ctx context.Context, run core.PipelineRun, t
 }
 
 func (s *Service) expandControlTasks(ctx context.Context, run core.PipelineRun, sourceTask core.Task, controls []core.Control) error {
-	for _, control := range controls {
-		role, op := controlRoleAndOp(control.Type)
-		taskID := dynamicTaskID(sourceTask.ID, control.AgentName, op)
-		parentID := sourceTask.ID
-		task := core.Task{
-			ID:                taskID,
-			RunID:             run.ID,
-			StageID:           core.StageID(taskID),
-			AgentRole:         role,
-			AgentID:           core.AgentID(strings.TrimSpace(control.AgentName)),
-			ParentID:          &parentID,
-			DependsOn:         &parentID,
-			Status:            core.TaskStatusPending,
-			InputArtifactRefs: toArtifactRefs(control.ArtifactURIs),
-			CreatedAt:         time.Now().UTC(),
-			UpdatedAt:         time.Now().UTC(),
-		}
-		if err := s.dispatchTask(ctx, run, task, op, control.ArtifactURIs); err != nil {
+	plans, err := buildModuleTaskPlans(sourceTask, controls)
+	if err != nil {
+		return err
+	}
+	for _, task := range plans {
+		if err := s.tasks.Create(ctx, task); err != nil {
 			return err
 		}
+		if s.logger != nil && task.Status == core.TaskStatusPending {
+			_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("pending task created: task=%s op=%s deps=%s", task.ID, opForTask(task), formatTaskDeps(taskDependencies(task))))
+		}
+	}
+	return s.advanceReadyTasks(ctx, run)
+}
+
+type modulePair struct {
+	coder  core.Control
+	tester core.Control
+}
+
+func buildModuleTaskPlans(sourceTask core.Task, controls []core.Control) ([]core.Task, error) {
+	pairs, err := pairControlsByModule(controls)
+	if err != nil {
+		return nil, err
+	}
+	parentID := sourceTask.ID
+	now := time.Now().UTC()
+	tasks := make([]core.Task, 0, len(pairs)*3+2)
+	testCodeIDs := make([]core.TaskID, 0, len(pairs))
+	for _, pair := range pairs {
+		coderID := dynamicTaskID(sourceTask.ID, pair.coder.AgentName, core.TaskOpWriteCode)
+		testDataID := dynamicTaskID(sourceTask.ID, pair.tester.AgentName, core.TaskOpTestData)
+		testCodeID := dynamicTaskID(sourceTask.ID, pair.tester.AgentName, core.TaskOpTestCode)
+		tasks = append(tasks,
+			core.Task{
+				ID:                coderID,
+				RunID:             sourceTask.RunID,
+				StageID:           core.StageID(coderID),
+				AgentRole:         core.AgentRoleCoder,
+				AgentID:           core.AgentID(strings.TrimSpace(pair.coder.AgentName)),
+				ParentID:          &parentID,
+				DependsOn:         &parentID,
+				DependsOnIDs:      []core.TaskID{parentID},
+				Status:            core.TaskStatusPending,
+				InputArtifactRefs: toArtifactRefs(pair.coder.ArtifactURIs),
+				CreatedAt:         now,
+				UpdatedAt:         now,
+			},
+			core.Task{
+				ID:                testDataID,
+				RunID:             sourceTask.RunID,
+				StageID:           core.StageID(testDataID),
+				AgentRole:         core.AgentRoleTester,
+				AgentID:           core.AgentID(strings.TrimSpace(pair.tester.AgentName)),
+				ParentID:          &parentID,
+				DependsOn:         &parentID,
+				DependsOnIDs:      []core.TaskID{parentID},
+				Status:            core.TaskStatusPending,
+				InputArtifactRefs: toArtifactRefs(pair.tester.ArtifactURIs),
+				CreatedAt:         now,
+				UpdatedAt:         now,
+			},
+			core.Task{
+				ID:           testCodeID,
+				RunID:        sourceTask.RunID,
+				StageID:      core.StageID(testCodeID),
+				AgentRole:    core.AgentRoleTester,
+				AgentID:      core.AgentID(strings.TrimSpace(pair.tester.AgentName)),
+				ParentID:     &parentID,
+				DependsOn:    &testDataID,
+				DependsOnIDs: []core.TaskID{coderID, testDataID},
+				Status:       core.TaskStatusPending,
+				CreatedAt:    now,
+				UpdatedAt:    now,
+			},
+		)
+		testCodeIDs = append(testCodeIDs, testCodeID)
+	}
+	mergeID := core.TaskID(fmt.Sprintf("%s_merge_code", sourceTask.ID))
+	globalTestID := core.TaskID(fmt.Sprintf("%s_global_test_code", sourceTask.ID))
+	tasks = append(tasks,
+		core.Task{
+			ID:           mergeID,
+			RunID:        sourceTask.RunID,
+			StageID:      core.StageID(mergeID),
+			AgentRole:    core.AgentRoleArchitect,
+			AgentID:      sourceTask.AgentID,
+			ParentID:     &parentID,
+			DependsOn:    lastTaskIDPtr(testCodeIDs),
+			DependsOnIDs: testCodeIDs,
+			Status:       core.TaskStatusPending,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+		core.Task{
+			ID:           globalTestID,
+			RunID:        sourceTask.RunID,
+			StageID:      core.StageID(globalTestID),
+			AgentRole:    core.AgentRoleArchitect,
+			AgentID:      sourceTask.AgentID,
+			ParentID:     &parentID,
+			DependsOn:    &mergeID,
+			DependsOnIDs: []core.TaskID{mergeID},
+			Status:       core.TaskStatusPending,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		},
+	)
+	return tasks, nil
+}
+
+func pairControlsByModule(controls []core.Control) ([]modulePair, error) {
+	byModule := make(map[string]*modulePair)
+	order := make([]string, 0)
+	for _, control := range controls {
+		moduleURI := strings.TrimSpace(control.ArtifactURIs[0])
+		if _, ok := byModule[moduleURI]; !ok {
+			byModule[moduleURI] = &modulePair{}
+			order = append(order, moduleURI)
+		}
+		pair := byModule[moduleURI]
+		switch control.Type {
+		case core.ControlTypeNewCoder:
+			if strings.TrimSpace(pair.coder.AgentName) != "" {
+				return nil, fmt.Errorf("module %q has duplicate coder controls", moduleURI)
+			}
+			pair.coder = control
+		case core.ControlTypeNewTester:
+			if strings.TrimSpace(pair.tester.AgentName) != "" {
+				return nil, fmt.Errorf("module %q has duplicate tester controls", moduleURI)
+			}
+			pair.tester = control
+		}
+	}
+	pairs := make([]modulePair, 0, len(order))
+	for _, moduleURI := range order {
+		pair := byModule[moduleURI]
+		if strings.TrimSpace(pair.coder.AgentName) == "" || strings.TrimSpace(pair.tester.AgentName) == "" {
+			return nil, fmt.Errorf("module %q requires one coder and one tester", moduleURI)
+		}
+		pairs = append(pairs, *pair)
+	}
+	return pairs, nil
+}
+
+func lastTaskIDPtr(items []core.TaskID) *core.TaskID {
+	if len(items) == 0 {
+		return nil
+	}
+	return &items[len(items)-1]
+}
+
+func (s *Service) advanceReadyTasks(ctx context.Context, run core.PipelineRun) error {
+	for {
+		items, err := s.tasks.ListByRun(ctx, run.ID)
+		if err != nil {
+			return err
+		}
+		byID := make(map[core.TaskID]core.Task, len(items))
+		for _, item := range items {
+			byID[item.ID] = item
+		}
+		dispatched := false
+		for _, item := range items {
+			if item.Status != core.TaskStatusPending || len(taskDependencies(item)) == 0 {
+				continue
+			}
+			ready, inputArtifacts, err := readyTaskInputs(item, byID)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				continue
+			}
+			if len(inputArtifacts) == 0 {
+				inputArtifacts = artifactRefsToStrings(item.InputArtifactRefs)
+			}
+			if s.logger != nil {
+				_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("ready task unlocked: task=%s op=%s deps=%s inputs=%d", item.ID, opForTask(item), formatTaskDeps(taskDependencies(item)), len(inputArtifacts)))
+			}
+			if err := s.dispatchTask(ctx, run, item, opForTask(item), inputArtifacts); err != nil {
+				return err
+			}
+			dispatched = true
+		}
+		if !dispatched {
+			return nil
+		}
+	}
+}
+
+func taskDependencies(task core.Task) []core.TaskID {
+	if len(task.DependsOnIDs) > 0 {
+		return task.DependsOnIDs
+	}
+	if task.DependsOn != nil {
+		return []core.TaskID{*task.DependsOn}
 	}
 	return nil
+}
+
+func formatTaskDeps(items []core.TaskID) string {
+	if len(items) == 0 {
+		return "[]"
+	}
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		parts = append(parts, string(item))
+	}
+	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func readyTaskInputs(task core.Task, byID map[core.TaskID]core.Task) (bool, []string, error) {
+	if len(task.InputArtifactRefs) > 0 {
+		for _, depID := range taskDependencies(task) {
+			dep, ok := byID[depID]
+			if !ok {
+				return false, nil, fmt.Errorf("dependency task %q not found for task %q", depID, task.ID)
+			}
+			if dep.Status != core.TaskStatusDone {
+				return false, nil, nil
+			}
+		}
+		return true, artifactRefsToStrings(task.InputArtifactRefs), nil
+	}
+	if strings.Contains(string(task.ID), "_merge_code") {
+		return readyMergeTaskInputs(task, byID)
+	}
+	inputs := make([]string, 0)
+	for _, depID := range taskDependencies(task) {
+		dep, ok := byID[depID]
+		if !ok {
+			return false, nil, fmt.Errorf("dependency task %q not found for task %q", depID, task.ID)
+		}
+		if dep.Status != core.TaskStatusDone {
+			return false, nil, nil
+		}
+		inputs = append(inputs, artifactRefsToStrings(dep.OutputArtifactRefs)...)
+	}
+	return true, inputs, nil
+}
+
+func readyMergeTaskInputs(task core.Task, byID map[core.TaskID]core.Task) (bool, []string, error) {
+	inputs := make([]string, 0)
+	for _, depID := range taskDependencies(task) {
+		dep, ok := byID[depID]
+		if !ok {
+			return false, nil, fmt.Errorf("dependency task %q not found for task %q", depID, task.ID)
+		}
+		if dep.Status != core.TaskStatusDone {
+			return false, nil, nil
+		}
+		inputs = append(inputs, artifactRefsToStrings(dep.OutputArtifactRefs)...)
+	}
+	if task.ParentID == nil {
+		return true, inputs, nil
+	}
+	for _, item := range byID {
+		if item.ParentID == nil || *item.ParentID != *task.ParentID {
+			continue
+		}
+		if item.AgentRole != core.AgentRoleCoder || !strings.Contains(string(item.ID), "_write_code") {
+			continue
+		}
+		if item.Status != core.TaskStatusDone {
+			return false, nil, nil
+		}
+		inputs = append(inputs, artifactRefsToStrings(item.OutputArtifactRefs)...)
+	}
+	return true, inputs, nil
+}
+
+func opForTask(task core.Task) string {
+	id := string(task.ID)
+	switch {
+	case strings.Contains(id, "_write_code"):
+		return core.TaskOpWriteCode
+	case strings.Contains(id, "_test_data"):
+		return core.TaskOpTestData
+	case strings.Contains(id, "_merge_code"):
+		return core.TaskOpMergeCode
+	case strings.Contains(id, "_global_test_code"), strings.Contains(id, "_test_code"):
+		return core.TaskOpTestCode
+	default:
+		return ""
+	}
 }
 
 func validateControls(controls []core.Control) error {
@@ -470,17 +658,6 @@ func validateControls(controls []core.Control) error {
 		}
 	}
 	return nil
-}
-
-func controlRoleAndOp(controlType core.ControlType) (core.AgentRole, string) {
-	switch controlType {
-	case core.ControlTypeNewCoder:
-		return core.AgentRoleCoder, core.TaskOpWriteCode
-	case core.ControlTypeNewTester:
-		return core.AgentRoleTester, core.TaskOpTestData
-	default:
-		return "", ""
-	}
 }
 
 func dynamicTaskID(sourceTaskID core.TaskID, agentName string, op string) core.TaskID {
@@ -567,6 +744,8 @@ func (s *Service) dispatchTask(ctx context.Context, run core.PipelineRun, task c
 		return s.upsertTask(ctx, task)
 	}
 
+	artifactURIs = appendDeliveryConfigForOp(run.ID, op, artifactURIs)
+	task.InputArtifactRefs = toArtifactRefs(artifactURIs)
 	task.Status = core.TaskStatusDispatched
 	task.UpdatedAt = time.Now().UTC()
 	if err := s.upsertTask(ctx, task); err != nil {
@@ -579,6 +758,7 @@ func (s *Service) dispatchTask(ctx context.Context, run core.PipelineRun, task c
 		TaskID:       task.ID,
 		ParentID:     task.ParentID,
 		DependsOn:    task.DependsOn,
+		DependsOnIDs: task.DependsOnIDs,
 		AgentID:      task.AgentID,
 		Op:           op,
 		ArtifactURIs: artifactURIs,
@@ -601,6 +781,20 @@ func (s *Service) dispatchTask(ctx context.Context, run core.PipelineRun, task c
 		return err
 	}
 	return s.dispatcher.Dispatch(ctx, dispatch)
+}
+
+func appendDeliveryConfigForOp(runID core.RunID, op string, artifactURIs []string) []string {
+	if op != core.TaskOpSplitModule && op != core.TaskOpResplitModule {
+		return artifactURIs
+	}
+	configURI := DeliveryConfigArtifactURI(runID)
+	out := append([]string(nil), artifactURIs...)
+	for _, uri := range out {
+		if uri == configURI {
+			return out
+		}
+	}
+	return append(out, configURI)
 }
 
 func (s *Service) upsertTask(ctx context.Context, task core.Task) error {

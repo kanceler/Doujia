@@ -95,6 +95,7 @@ type TaskMetaData struct {
 	TaskID       TaskID         `json:"task_id"`
 	ParentID     *TaskID        `json:"parent_id,omitempty"`
 	DependsOn    *TaskID        `json:"depends_on,omitempty"`
+	DependsOnIDs []TaskID       `json:"depends_on_ids,omitempty"`
 	AgentID      AgentID        `json:"agent_id"`
 	Op           string         `json:"op"`
 	ArtifactURIs []string       `json:"artifact_uris"`
@@ -103,15 +104,30 @@ type TaskMetaData struct {
 }
 
 type RunConfig struct {
-	LLM LLMConfig
+	LLM      LLMConfig      `json:"llm"`
+	Delivery DeliveryConfig `json:"delivery,omitempty"`
 }
 
 type LLMConfig struct {
-	ProviderType   string
-	BaseURL        string
-	APIKey         string
-	Model          string
-	RequestTimeout time.Duration
+	ProviderType   string        `json:"provider_type"`
+	BaseURL        string        `json:"base_url,omitempty"`
+	APIKey         string        `json:"api_key,omitempty"`
+	Model          string        `json:"model,omitempty"`
+	RequestTimeout time.Duration `json:"request_timeout,omitempty"`
+}
+
+type DeliveryConfig struct {
+	MaxCoderAgents         int          `json:"max_coder_agents"`
+	MaxTesterAgents        int          `json:"max_tester_agents"`
+	RequireTesterPerModule bool         `json:"require_tester_per_module"`
+	AllowParallelWork      bool         `json:"allow_parallel_work"`
+	Git                    GitRunConfig `json:"git"`
+}
+
+type GitRunConfig struct {
+	RepoURL    string `json:"repo_url,omitempty"`
+	MainBranch string `json:"main_branch,omitempty"`
+	BaseRef    string `json:"base_ref,omitempty"`
 }
 
 type PipelineRun struct {
@@ -134,6 +150,7 @@ type Task struct {
 	Status             TaskStatus
 	ParentID           *TaskID
 	DependsOn          *TaskID
+	DependsOnIDs       []TaskID
 	InputArtifactRefs  []ArtifactRef
 	OutputArtifactRefs []ArtifactRef
 	CreatedAt          time.Time

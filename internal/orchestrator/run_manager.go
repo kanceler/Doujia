@@ -2,15 +2,17 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
 	"devflow/internal/core"
 	"devflow/internal/logging"
 	"devflow/internal/pipeline"
 	"devflow/internal/runtime"
 	"devflow/internal/state/repo"
-	"fmt"
-	"os"
-	"path/filepath"
-	"time"
 )
 
 type RunManager struct {
@@ -48,6 +50,9 @@ func (m *RunManager) CreateRun(ctx context.Context, runID core.RunID, pipelineID
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		return err
 	}
+	if err := writeDeliveryConfigArtifact(projectDir, config.Delivery); err != nil {
+		return err
+	}
 	now := time.Now().UTC()
 	err := m.runs.Create(ctx, core.PipelineRun{
 		ID:         runID,
@@ -83,4 +88,34 @@ func (m *RunManager) StartRun(ctx context.Context, runID core.RunID) error {
 		_ = m.logger.Log(runID, "RunManager", fmt.Sprintf("run started: project=%s session=%s", run.ProjectDir, session.ID))
 	}
 	return m.orchestrator.Start(ctx, runID)
+}
+
+func DeliveryConfigArtifactURI(runID core.RunID) string {
+	return fmt.Sprintf("projects/%s/system/run_delivery_config.json", runID)
+}
+
+func writeDeliveryConfigArtifact(projectDir string, config core.DeliveryConfig) error {
+	config = normalizeDeliveryConfig(config)
+	content, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	fullPath := filepath.Join(projectDir, "system", "run_delivery_config.json")
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(fullPath, append(content, '\n'), 0o644)
+}
+
+func normalizeDeliveryConfig(config core.DeliveryConfig) core.DeliveryConfig {
+	if config.MaxCoderAgents <= 0 {
+		config.MaxCoderAgents = 1
+	}
+	if config.MaxTesterAgents <= 0 {
+		config.MaxTesterAgents = 1
+	}
+	if config.Git.MainBranch == "" {
+		config.Git.MainBranch = "main"
+	}
+	return config
 }

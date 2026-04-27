@@ -44,7 +44,7 @@ func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskM
 }
 
 func (a *Agent) writeTestArtifact(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
-	filename := fmt.Sprintf("%s_test_v1.md", a.agentID)
+	filename := fmt.Sprintf("%s_%s_v1.md", a.agentID, task.Op)
 	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "test", filename)
 	content := fmt.Sprintf("# Test Stub\n\nagent: %s\nop: %s\n", a.agentID, task.Op)
 	if a.artifactStore != nil {

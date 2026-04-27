@@ -47,16 +47,16 @@ type queuedTask struct {
 }
 
 type TaskRuntime struct {
-	mu           sync.RWMutex
-	factories    map[core.AgentRole]Agent
-	instances    map[core.RuntimeID]agentInstance
-	agentIndex   map[agentRuntimeKey]core.RuntimeID
-	queue        chan queuedTask
-	sink         FeedbackSink
-	binder       Binder
-	nextID       int
-	logger       logging.RunLogger
-	config       AgentRuntimeConfig
+	mu         sync.RWMutex
+	factories  map[core.AgentRole]Agent
+	instances  map[core.RuntimeID]agentInstance
+	agentIndex map[agentRuntimeKey]core.RuntimeID
+	queue      chan queuedTask
+	sink       FeedbackSink
+	binder     Binder
+	nextID     int
+	logger     logging.RunLogger
+	config     AgentRuntimeConfig
 }
 
 func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger, config AgentRuntimeConfig) *TaskRuntime {
@@ -169,14 +169,15 @@ func (r *TaskRuntime) worker() {
 		feedback, err := instance.agent.Execute(context.Background(), item.task)
 		if err != nil {
 			feedback = core.TaskMetaData{
-				Direction: core.TaskDirectionFeedback,
-				RunID:     item.task.RunID,
-				TaskID:    item.task.TaskID,
-				ParentID:  item.task.ParentID,
-				DependsOn: item.task.DependsOn,
-				AgentID:   instance.agentID,
-				Op:        item.task.Op,
-				Result:    core.TaskResultCodeFail,
+				Direction:    core.TaskDirectionFeedback,
+				RunID:        item.task.RunID,
+				TaskID:       item.task.TaskID,
+				ParentID:     item.task.ParentID,
+				DependsOn:    item.task.DependsOn,
+				DependsOnIDs: item.task.DependsOnIDs,
+				AgentID:      instance.agentID,
+				Op:           item.task.Op,
+				Result:       core.TaskResultCodeFail,
 			}
 		}
 		if r.logger != nil {

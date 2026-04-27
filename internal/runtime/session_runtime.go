@@ -105,14 +105,15 @@ func (r *InMemorySessionRuntime) DispatchToSession(ctx context.Context, task cor
 	feedback, err := session.Agent.Execute(ctx, task)
 	if err != nil {
 		feedback = core.TaskMetaData{
-			Direction: core.TaskDirectionFeedback,
-			RunID:     task.RunID,
-			TaskID:    task.TaskID,
-			ParentID:  task.ParentID,
-			DependsOn: task.DependsOn,
-			AgentID:   session.CEOAgent,
-			Op:        task.Op,
-			Result:    core.TaskResultCodeFail,
+			Direction:    core.TaskDirectionFeedback,
+			RunID:        task.RunID,
+			TaskID:       task.TaskID,
+			ParentID:     task.ParentID,
+			DependsOn:    task.DependsOn,
+			DependsOnIDs: task.DependsOnIDs,
+			AgentID:      session.CEOAgent,
+			Op:           task.Op,
+			Result:       core.TaskResultCodeFail,
 		}
 	}
 	if r.sink != nil {

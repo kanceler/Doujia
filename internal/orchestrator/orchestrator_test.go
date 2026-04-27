@@ -2,16 +2,18 @@ package orchestrator_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
 	"devflow/internal/app"
 	"devflow/internal/core"
 	"devflow/internal/orchestrator"
 	"devflow/internal/pipeline"
 	"devflow/internal/runtime"
 	"devflow/internal/state/repo"
-	"os"
-	"path/filepath"
-	"testing"
-	"time"
 )
 
 func TestPhaseOneFlowWithExternalCEOFeedback(t *testing.T) {
@@ -405,6 +407,16 @@ func TestPhaseTwoSplitModuleControlCreatesDynamicCoderTesterTasks(t *testing.T) 
 			t.Fatalf("feedback %s error = %v", feedback.TaskID, err)
 		}
 	}
+	if len(dispatcher.dispatched) == 0 {
+		t.Fatalf("expected split_module dispatch")
+	}
+	splitDispatch := dispatcher.dispatched[len(dispatcher.dispatched)-1]
+	if splitDispatch.Op != core.TaskOpSplitModule {
+		t.Fatalf("last op = %s, want %s", splitDispatch.Op, core.TaskOpSplitModule)
+	}
+	if !containsString(splitDispatch.ArtifactURIs, orchestrator.DeliveryConfigArtifactURI(runID)) {
+		t.Fatalf("split_module artifact uris = %v, want delivery config uri", splitDispatch.ArtifactURIs)
+	}
 
 	moduleURI := "projects/run_phase_two_control/agents/architect01/artifacts/module/module01.md"
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
@@ -437,13 +449,178 @@ func TestPhaseTwoSplitModuleControlCreatesDynamicCoderTesterTasks(t *testing.T) 
 	if testerTask.AgentRole != core.AgentRoleTester || testerTask.AgentID != "tester01" || testerTask.Status != core.TaskStatusDispatched {
 		t.Fatalf("tester task = %+v, want tester01 dispatched", testerTask)
 	}
-
-	if len(dispatcher.dispatched) < 2 {
-		t.Fatalf("dispatch count = %d, want at least 2", len(dispatcher.dispatched))
+	testCodeTask, err := taskRepo.Get(ctx, runID, "task_06_tester01_test_code")
+	if err != nil {
+		t.Fatalf("Get(test code task) error = %v", err)
 	}
-	lastTwo := dispatcher.dispatched[len(dispatcher.dispatched)-2:]
-	if lastTwo[0].Op != core.TaskOpWriteCode || lastTwo[1].Op != core.TaskOpTestData {
-		t.Fatalf("last dynamic ops = %s, %s; want %s, %s", lastTwo[0].Op, lastTwo[1].Op, core.TaskOpWriteCode, core.TaskOpTestData)
+	if testCodeTask.Status != core.TaskStatusPending {
+		t.Fatalf("test code status = %s, want pending", testCodeTask.Status)
+	}
+	if len(testCodeTask.DependsOnIDs) != 2 {
+		t.Fatalf("test code deps = %v, want coder+test_data deps", testCodeTask.DependsOnIDs)
+	}
+
+	if len(dispatcher.dispatched) < 3 {
+		t.Fatalf("dispatch count = %d, want split + coder/tester dispatches", len(dispatcher.dispatched))
+	}
+	if countDispatchOp(dispatcher.dispatched, core.TaskOpWriteCode) != 1 || countDispatchOp(dispatcher.dispatched, core.TaskOpTestData) != 1 {
+		t.Fatalf("dispatches = %+v, want one write_code and one test_data", dispatcher.dispatched)
+	}
+}
+
+func TestPhaseTwoModulePairCreatesTestCodeAndMergeDependencies(t *testing.T) {
+	ctx := context.Background()
+	runRepo := repo.NewMemoryRunRepository()
+	taskRepo := repo.NewMemoryTaskRepository()
+	dispatcher := &recordingDispatcher{}
+	sessionDispatcher := &recordingSessionRuntime{}
+	service := orchestrator.NewService(
+		pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseTwo()),
+		runRepo,
+		taskRepo,
+		recordingProvisioner{},
+		dispatcher,
+		sessionDispatcher,
+		nil,
+	)
+
+	const runID core.RunID = "run_phase_two_pair_deps"
+	if err := runRepo.Create(ctx, core.PipelineRun{
+		ID:         runID,
+		PipelineID: pipeline.PipelineIDPhaseTwo,
+		Status:     core.RunStatusRunning,
+		ProjectDir: t.TempDir(),
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create(run) error = %v", err)
+	}
+	if err := taskRepo.Create(ctx, core.Task{
+		ID:        "task_06",
+		RunID:     runID,
+		StageID:   "task_06",
+		AgentRole: core.AgentRoleArchitect,
+		AgentID:   "architect01",
+		Status:    core.TaskStatusDispatched,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create(task_06) error = %v", err)
+	}
+
+	module01 := "projects/run_phase_two_pair_deps/agents/architect01/artifacts/module/module01.md"
+	module02 := "projects/run_phase_two_pair_deps/agents/architect01/artifacts/module/module02.md"
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:    core.TaskDirectionFeedback,
+		RunID:        runID,
+		TaskID:       "task_06",
+		AgentID:      "architect01",
+		Op:           core.TaskOpSplitModule,
+		ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/architect01/artifacts/module/module_plan_v1.json"},
+		Result:       core.TaskResultCodeOK,
+		Control: []core.Control{
+			{Type: core.ControlTypeNewCoder, AgentName: "coder01", ArtifactURIs: []string{module01}},
+			{Type: core.ControlTypeNewTester, AgentName: "tester01", ArtifactURIs: []string{module01}},
+			{Type: core.ControlTypeNewCoder, AgentName: "coder02", ArtifactURIs: []string{module02}},
+			{Type: core.ControlTypeNewTester, AgentName: "tester02", ArtifactURIs: []string{module02}},
+		},
+	}); err != nil {
+		t.Fatalf("split_module feedback error = %v", err)
+	}
+
+	if len(dispatcher.dispatched) != 4 {
+		t.Fatalf("dispatch count after split = %d, want 4 write/test-data tasks", len(dispatcher.dispatched))
+	}
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:    core.TaskDirectionFeedback,
+		RunID:        runID,
+		TaskID:       "task_06_coder01_write_code",
+		ParentID:     taskIDPtr("task_06"),
+		AgentID:      "coder01",
+		Op:           core.TaskOpWriteCode,
+		ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/coder01/artifacts/code/coder01_code_v1.md"},
+		Result:       core.TaskResultCodeOK,
+	}); err != nil {
+		t.Fatalf("coder01 feedback error = %v", err)
+	}
+	testCode01, err := taskRepo.Get(ctx, runID, "task_06_tester01_test_code")
+	if err != nil {
+		t.Fatalf("Get(tester01 test_code) error = %v", err)
+	}
+	if testCode01.Status != core.TaskStatusPending {
+		t.Fatalf("tester01 test_code status = %s, want pending until test_data done", testCode01.Status)
+	}
+
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:    core.TaskDirectionFeedback,
+		RunID:        runID,
+		TaskID:       "task_06_tester01_test_data",
+		ParentID:     taskIDPtr("task_06"),
+		AgentID:      "tester01",
+		Op:           core.TaskOpTestData,
+		ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/tester01/artifacts/test/tester01_data_v1.md"},
+		Result:       core.TaskResultCodeOK,
+	}); err != nil {
+		t.Fatalf("tester01 test_data feedback error = %v", err)
+	}
+	testCode01, err = taskRepo.Get(ctx, runID, "task_06_tester01_test_code")
+	if err != nil {
+		t.Fatalf("Get(tester01 test_code) error = %v", err)
+	}
+	if testCode01.Status != core.TaskStatusDispatched {
+		t.Fatalf("tester01 test_code status = %s, want dispatched", testCode01.Status)
+	}
+	last := dispatcher.dispatched[len(dispatcher.dispatched)-1]
+	if last.TaskID != "task_06_tester01_test_code" || last.Op != core.TaskOpTestCode {
+		t.Fatalf("last dispatch = %+v, want tester01 test_code", last)
+	}
+	if len(last.ArtifactURIs) != 2 {
+		t.Fatalf("tester01 test_code inputs = %v, want code + test data outputs", last.ArtifactURIs)
+	}
+
+	feedbacks := []core.TaskMetaData{
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_06_coder02_write_code", ParentID: taskIDPtr("task_06"), AgentID: "coder02", Op: core.TaskOpWriteCode, ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/coder02/artifacts/code/coder02_code_v1.md"}, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_06_tester02_test_data", ParentID: taskIDPtr("task_06"), AgentID: "tester02", Op: core.TaskOpTestData, ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/tester02/artifacts/test/tester02_data_v1.md"}, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_06_tester01_test_code", ParentID: taskIDPtr("task_06"), AgentID: "tester01", Op: core.TaskOpTestCode, ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/tester01/artifacts/test/tester01_report_v1.md"}, Result: core.TaskResultCodeOK},
+	}
+	for _, feedback := range feedbacks {
+		if err := service.OnFeedback(ctx, feedback); err != nil {
+			t.Fatalf("feedback %s error = %v", feedback.TaskID, err)
+		}
+	}
+	mergeTask, err := taskRepo.Get(ctx, runID, "task_06_merge_code")
+	if err != nil {
+		t.Fatalf("Get(merge task) error = %v", err)
+	}
+	if mergeTask.Status != core.TaskStatusPending {
+		t.Fatalf("merge status = %s, want pending until tester02 test_code done", mergeTask.Status)
+	}
+
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:    core.TaskDirectionFeedback,
+		RunID:        runID,
+		TaskID:       "task_06_tester02_test_code",
+		ParentID:     taskIDPtr("task_06"),
+		AgentID:      "tester02",
+		Op:           core.TaskOpTestCode,
+		ArtifactURIs: []string{"projects/run_phase_two_pair_deps/agents/tester02/artifacts/test/tester02_report_v1.md"},
+		Result:       core.TaskResultCodeOK,
+	}); err != nil {
+		t.Fatalf("tester02 test_code feedback error = %v", err)
+	}
+	mergeTask, err = taskRepo.Get(ctx, runID, "task_06_merge_code")
+	if err != nil {
+		t.Fatalf("Get(merge task) error = %v", err)
+	}
+	if mergeTask.Status != core.TaskStatusDispatched {
+		t.Fatalf("merge status = %s, want dispatched", mergeTask.Status)
+	}
+	mergeDispatch := dispatcher.dispatched[len(dispatcher.dispatched)-1]
+	if mergeDispatch.TaskID != "task_06_merge_code" || mergeDispatch.Op != core.TaskOpMergeCode {
+		t.Fatalf("last dispatch = %+v, want merge_code", mergeDispatch)
+	}
+	if len(mergeDispatch.ArtifactURIs) != 4 {
+		t.Fatalf("merge inputs = %v, want two code outputs and two test reports", mergeDispatch.ArtifactURIs)
 	}
 }
 
@@ -522,14 +699,36 @@ func TestPhaseTwoInvalidControlCreatesResplitTask(t *testing.T) {
 	if dispatcher.dispatched[0].Op != core.TaskOpResplitModule {
 		t.Fatalf("child op = %s, want %s", dispatcher.dispatched[0].Op, core.TaskOpResplitModule)
 	}
+	if !containsString(dispatcher.dispatched[0].ArtifactURIs, orchestrator.DeliveryConfigArtifactURI(runID)) {
+		t.Fatalf("resplit artifact uris = %v, want delivery config uri", dispatcher.dispatched[0].ArtifactURIs)
+	}
 }
 
 func TestPhaseTwoStubFullFlowWithCoderTester(t *testing.T) {
 	projectsRoot := t.TempDir()
+	const runID core.RunID = "run_phase_two_stub_full"
+	runPhaseTwoStubFlow(t, projectsRoot, runID)
+}
+
+func TestPhaseTwoStubFullFlowWritesEventsLog(t *testing.T) {
+	projectsRoot := filepath.Clean(filepath.Join("..", "..", "runtime", "workspaces"))
+	const runID core.RunID = "run_phase2_log_stub"
+	runRoot := filepath.Join(projectsRoot, string(runID))
+	if err := os.RemoveAll(runRoot); err != nil {
+		t.Fatalf("RemoveAll(runRoot) error = %v", err)
+	}
+	run := runPhaseTwoStubFlow(t, projectsRoot, runID)
+	eventsLog := filepath.Join(run.ProjectDir, "events.log")
+	if _, err := os.Stat(eventsLog); err != nil {
+		t.Fatalf("events.log should exist: %v", err)
+	}
+}
+
+func runPhaseTwoStubFlow(t *testing.T, projectsRoot string, runID core.RunID) core.PipelineRun {
+	t.Helper()
 	bootstrap := app.NewBootstrap(projectsRoot)
 	ctx := context.Background()
 
-	const runID core.RunID = "run_phase_two_stub_full"
 	if err := bootstrap.Modules.RunManager.CreateRun(ctx, runID, pipeline.PipelineIDPhaseTwo, noopRunConfig()); err != nil {
 		t.Fatalf("CreateRun() error = %v", err)
 	}
@@ -560,6 +759,7 @@ func TestPhaseTwoStubFullFlowWithCoderTester(t *testing.T) {
 	testerOutput := filepath.Join(run.ProjectDir, "agents", "tester01", "artifacts", "test", "tester01_test_v1.md")
 	mergeOutput := filepath.Join(run.ProjectDir, "agents", "architect01", "artifacts", "code", "merged_code_v1.md")
 	globalTestOutput := filepath.Join(run.ProjectDir, "agents", "architect01", "artifacts", "test", "global_test_report_v1.md")
+	deliveryConfigOutput := filepath.Join(run.ProjectDir, "system", "run_delivery_config.json")
 	if _, err := os.Stat(coderOutput); err != nil {
 		t.Fatalf("coder output should exist: %v", err)
 	}
@@ -572,6 +772,23 @@ func TestPhaseTwoStubFullFlowWithCoderTester(t *testing.T) {
 	if _, err := os.Stat(globalTestOutput); err != nil {
 		t.Fatalf("global test output should exist: %v", err)
 	}
+	deliveryConfigContent, err := os.ReadFile(deliveryConfigOutput)
+	if err != nil {
+		t.Fatalf("delivery config artifact should exist: %v", err)
+	}
+	if !strings.Contains(string(deliveryConfigContent), `"max_coder_agents": 2`) {
+		t.Fatalf("delivery config artifact should include max coder agents: %s", string(deliveryConfigContent))
+	}
+	if !strings.Contains(string(deliveryConfigContent), `"max_tester_agents": 2`) {
+		t.Fatalf("delivery config artifact should include max tester agents: %s", string(deliveryConfigContent))
+	}
+	if !strings.Contains(string(deliveryConfigContent), `"main_branch": "main"`) {
+		t.Fatalf("delivery config artifact should include main branch: %s", string(deliveryConfigContent))
+	}
+	if strings.Contains(string(deliveryConfigContent), "api_key") || strings.Contains(string(deliveryConfigContent), "provider_type") {
+		t.Fatalf("delivery config artifact should not expose llm config: %s", string(deliveryConfigContent))
+	}
+	return run
 }
 
 func waitForFile(t *testing.T, fullPath string) {
@@ -680,6 +897,15 @@ func noopRunConfig() core.RunConfig {
 		LLM: core.LLMConfig{
 			ProviderType: "noop",
 		},
+		Delivery: core.DeliveryConfig{
+			MaxCoderAgents:         2,
+			MaxTesterAgents:        2,
+			RequireTesterPerModule: true,
+			AllowParallelWork:      true,
+			Git: core.GitRunConfig{
+				MainBranch: "main",
+			},
+		},
 	}
 }
 
@@ -692,7 +918,39 @@ func realLLMRunConfig() core.RunConfig {
 			Model:          "gpt-5.4",
 			RequestTimeout: 180 * time.Second,
 		},
+		Delivery: core.DeliveryConfig{
+			MaxCoderAgents:         2,
+			MaxTesterAgents:        2,
+			RequireTesterPerModule: true,
+			AllowParallelWork:      true,
+			Git: core.GitRunConfig{
+				MainBranch: "main",
+			},
+		},
 	}
+}
+
+func containsString(items []string, want string) bool {
+	for _, item := range items {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func countDispatchOp(items []core.TaskMetaData, op string) int {
+	count := 0
+	for _, item := range items {
+		if item.Op == op {
+			count++
+		}
+	}
+	return count
+}
+
+func taskIDPtr(id core.TaskID) *core.TaskID {
+	return &id
 }
 
 type recordingProvisioner struct{}
