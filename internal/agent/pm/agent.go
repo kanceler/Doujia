@@ -38,9 +38,11 @@ func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.A
 
 func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	switch task.Op {
-	case "pm_write_plan":
+	case core.TaskOpWritePlan:
+		return a.executeWritePlanFallback(task)
+	case "pm_write_plan", core.TaskOpRewrite, core.TaskOpReplan:
 		return a.executeWritePlan(ctx, task)
-	case "pm_review_design":
+	case "pm_review_design", core.TaskOpReviewPlan:
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
 	default:
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil

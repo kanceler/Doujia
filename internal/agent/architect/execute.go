@@ -82,6 +82,94 @@ func (a *Agent) executeArchitectureFallback(task core.TaskMetaData) (core.TaskMe
 	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
 }
 
+func (a *Agent) executeSplitModule(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	a.logStep("split_module fallback output used")
+	moduleURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "module", "module01.md")
+	planURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "module", "module_plan_v1.json")
+	moduleContent := "# Module 01\n\nBuild the first stub module.\n"
+	planContent := `{"modules":[{"id":"module01","coder":"coder01","tester":"tester01"}]}`
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(ctx, moduleURI, []byte(moduleContent)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		if err := a.artifactStore.Write(ctx, planURI, []byte(planContent)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		return core.TaskMetaData{
+			Direction:    core.TaskDirectionFeedback,
+			RunID:        a.runID,
+			TaskID:       task.TaskID,
+			ParentID:     task.ParentID,
+			DependsOn:    task.DependsOn,
+			AgentID:      a.agentID,
+			Op:           task.Op,
+			ArtifactURIs: []string{planURI},
+			Result:       core.TaskResultCodeOK,
+			Control: []core.Control{
+				{Type: core.ControlTypeNewCoder, AgentName: "coder01", ArtifactURIs: []string{moduleURI}},
+				{Type: core.ControlTypeNewTester, AgentName: "tester01", ArtifactURIs: []string{moduleURI}},
+			},
+		}, nil
+	}
+	moduleOutput, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "module", "module01.md"), moduleContent)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	planOutput, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "module", "module_plan_v1.json"), planContent)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return core.TaskMetaData{
+		Direction:    core.TaskDirectionFeedback,
+		RunID:        a.runID,
+		TaskID:       task.TaskID,
+		ParentID:     task.ParentID,
+		DependsOn:    task.DependsOn,
+		AgentID:      a.agentID,
+		Op:           task.Op,
+		ArtifactURIs: []string{planOutput},
+		Result:       core.TaskResultCodeOK,
+		Control: []core.Control{
+			{Type: core.ControlTypeNewCoder, AgentName: "coder01", ArtifactURIs: []string{moduleOutput}},
+			{Type: core.ControlTypeNewTester, AgentName: "tester01", ArtifactURIs: []string{moduleOutput}},
+		},
+	}, nil
+}
+
+func (a *Agent) executeMergeCode(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	a.logStep("merge_code fallback output used")
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "code", "merged_code_v1.md")
+	content := "# Merged Code Stub\n\nArchitect merge output is ready.\n"
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(ctx, outputURI, []byte(content)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+	}
+	output, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "code", "merged_code_v1.md"), content)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
+}
+
+func (a *Agent) executeGlobalTestCode(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	a.logStep("global test_code fallback output used")
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "test", "global_test_report_v1.md")
+	content := "# Global Test Report Stub\n\nArchitect global test passed.\n"
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(ctx, outputURI, []byte(content)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+	}
+	output, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "test", "global_test_report_v1.md"), content)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
+}
+
 func (a *Agent) logStep(message string) {
 	if a.logger != nil {
 		_ = a.logger.Log(a.runID, "ArchitectAgent", message)

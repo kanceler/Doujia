@@ -43,8 +43,28 @@ const (
 type TaskResultCode string
 
 const (
-	TaskResultCodeOK   TaskResultCode = "kok"
-	TaskResultCodeFail TaskResultCode = "kfail"
+	TaskResultCodeOK              TaskResultCode = "kok"
+	TaskResultCodeFail            TaskResultCode = "kfail"
+	TaskResultCodeUpstreamMissing TaskResultCode = "k_upstream_missing"
+	TaskResultCodeReviewReject    TaskResultCode = "k_review_reject"
+	TaskResultCodeRewrite         TaskResultCode = "krewrite"
+	TaskResultCodeReplan          TaskResultCode = "kreplan"
+	TaskResultCodeBug             TaskResultCode = "kbug"
+	TaskResultCodeControlInvalid  TaskResultCode = "kcontrol_invalid"
+)
+
+const (
+	TaskOpWritePlan     = "write_plan"
+	TaskOpReviewPlan    = "review_plan"
+	TaskOpRewrite       = "rewrite"
+	TaskOpReplan        = "replan"
+	TaskOpSplitModule   = "split_module"
+	TaskOpResplitModule = "resplit_module"
+	TaskOpWriteCode     = "write_code"
+	TaskOpTestData      = "test_data"
+	TaskOpTestCode      = "test_code"
+	TaskOpDebug         = "debug"
+	TaskOpMergeCode     = "merge_code"
 )
 
 type ControlType string
@@ -95,14 +115,14 @@ type LLMConfig struct {
 }
 
 type PipelineRun struct {
-	ID          RunID
-	PipelineID  PipelineID
-	Status      RunStatus
-	ProjectDir  string
-	SessionID   SessionID
-	Config      RunConfig
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID         RunID
+	PipelineID PipelineID
+	Status     RunStatus
+	ProjectDir string
+	SessionID  SessionID
+	Config     RunConfig
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Task struct {
@@ -119,4 +139,3 @@ type Task struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
-

@@ -3,7 +3,9 @@ package app
 import (
 	architectagent "devflow/internal/agent/architect"
 	ceoagent "devflow/internal/agent/ceo"
+	coderagent "devflow/internal/agent/coder"
 	pmagent "devflow/internal/agent/pm"
+	testeragent "devflow/internal/agent/tester"
 	"devflow/internal/artifact"
 	"devflow/internal/core"
 	"devflow/internal/llm"
@@ -35,7 +37,7 @@ type Bootstrap struct {
 }
 
 func NewBootstrap(projectsRoot string) *Bootstrap {
-	pipelineRegistry := pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseOne())
+	pipelineRegistry := pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseOne(), pipeline.BuiltinPhaseTwo())
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
 	runLogger := logging.NewFileRunLogger(projectsRoot)
@@ -89,8 +91,12 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 
 	pmFactory := pmagent.NewFactory()
 	architectFactory := architectagent.NewFactory()
+	coderFactory := coderagent.NewFactory()
+	testerFactory := testeragent.NewFactory()
 	taskRuntime.RegisterTemplate(core.AgentRolePM, pmFactory)
 	taskRuntime.RegisterTemplate(core.AgentRoleArchitect, architectFactory)
+	taskRuntime.RegisterTemplate(core.AgentRoleCoder, coderFactory)
+	taskRuntime.RegisterTemplate(core.AgentRoleTester, testerFactory)
 
 	runManager := orchestrator.NewRunManager(pipelineRegistry, runRepo, sessionRuntime, orch, projectsRoot, runLogger)
 

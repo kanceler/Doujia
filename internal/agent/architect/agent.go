@@ -38,7 +38,15 @@ func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.A
 
 func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	switch task.Op {
-	case "architecture_generation":
+	case core.TaskOpWritePlan:
+		return a.executeArchitectureFallback(task)
+	case core.TaskOpSplitModule, core.TaskOpResplitModule:
+		return a.executeSplitModule(ctx, task)
+	case core.TaskOpMergeCode:
+		return a.executeMergeCode(ctx, task)
+	case core.TaskOpTestCode:
+		return a.executeGlobalTestCode(ctx, task)
+	case "architecture_generation", core.TaskOpRewrite, core.TaskOpReplan:
 		return a.executeArchitectureGeneration(ctx, task)
 	case "architect_review_proposal":
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil

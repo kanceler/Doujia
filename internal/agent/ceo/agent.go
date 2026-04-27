@@ -52,9 +52,11 @@ func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskM
 	}
 
 	switch task.Op {
-	case "ceo_write_requirement":
+	case "ceo_write_requirement", core.TaskOpWritePlan:
 		return a.executeWriteRequirement(ctx, task)
-	case "ceo_review_plan", "ceo_user_confirm":
+	case core.TaskOpRewrite, core.TaskOpReplan:
+		return a.executeWriteRequirement(ctx, task)
+	case "ceo_review_plan", "ceo_user_confirm", core.TaskOpReviewPlan:
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
 	default:
 		return core.TaskMetaData{}, fmt.Errorf("unsupported ceo op %q", task.Op)
