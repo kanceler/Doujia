@@ -1,0 +1,31 @@
+package tester
+
+import (
+	"fmt"
+	"strings"
+
+	"devflow/internal/agentengine"
+	"devflow/internal/core"
+)
+
+func buildPrompt(task core.TaskMetaData, recipe Recipe, docs []agentengine.ArtifactDocument) string {
+	var builder strings.Builder
+	builder.WriteString("# Role\n")
+	builder.WriteString(recipe.SystemPrompt)
+	builder.WriteString("\n\n# Task\n")
+	builder.WriteString(fmt.Sprintf("task_id: %s\n", task.TaskID))
+	builder.WriteString(fmt.Sprintf("agent_id: %s\n", task.AgentID))
+	builder.WriteString(fmt.Sprintf("op: %s\n", task.Op))
+	builder.WriteString("\n# Goal\n")
+	builder.WriteString(recipe.Description)
+	builder.WriteString("\n\n# Inputs\n")
+	for _, doc := range docs {
+		builder.WriteString("\n---\n")
+		builder.WriteString(fmt.Sprintf("source: %s\n", doc.URI))
+		builder.WriteString(doc.Content)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n# Instructions\n")
+	builder.WriteString(recipe.UserInstruction)
+	return builder.String()
+}

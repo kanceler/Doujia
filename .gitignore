@@ -3,3 +3,4 @@ runtime/workspaces/run_*/
 .llm.test.local.ps1
 .llm.probe.local.ps1
 internal/orchestrator/projects/
+tools/opencode/node_modules/

@@ -46,7 +46,7 @@ func (r *InMemorySessionRuntime) SetFeedbackSink(sink FeedbackSink) {
 	r.sink = sink
 }
 
-func (r *InMemorySessionRuntime) CreateSession(_ context.Context, run core.PipelineRun) (Session, error) {
+func (r *InMemorySessionRuntime) CreateSession(ctx context.Context, run core.PipelineRun) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	runID := run.ID
@@ -71,6 +71,9 @@ func (r *InMemorySessionRuntime) CreateSession(_ context.Context, run core.Pipel
 		RunRoot:       projectRoot,
 		RunConfig:     run.Config,
 		WorkspacePath: workspacePath,
+	}
+	if err := loadTaskHistory(ctx, &init, r.config); err != nil {
+		return Session{}, err
 	}
 	deps, err := buildAgentDeps(init, r.config)
 	if err != nil {

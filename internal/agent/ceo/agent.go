@@ -18,7 +18,7 @@ type Agent struct {
 	agentID       core.AgentID
 	runID         core.RunID
 	workspacePath string
-	taskHistory   []core.TaskMetaData
+	taskHistory   []core.AgentTaskHistory
 	artifactStore artifact.Store
 	llmClient     llm.Client
 	logger        logging.RunLogger

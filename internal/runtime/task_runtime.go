@@ -47,16 +47,16 @@ type queuedTask struct {
 }
 
 type TaskRuntime struct {
-	mu           sync.RWMutex
-	factories    map[core.AgentRole]Agent
-	instances    map[core.RuntimeID]agentInstance
-	agentIndex   map[agentRuntimeKey]core.RuntimeID
-	queue        chan queuedTask
-	sink         FeedbackSink
-	binder       Binder
-	nextID       int
-	logger       logging.RunLogger
-	config       AgentRuntimeConfig
+	mu         sync.RWMutex
+	factories  map[core.AgentRole]Agent
+	instances  map[core.RuntimeID]agentInstance
+	agentIndex map[agentRuntimeKey]core.RuntimeID
+	queue      chan queuedTask
+	sink       FeedbackSink
+	binder     Binder
+	nextID     int
+	logger     logging.RunLogger
+	config     AgentRuntimeConfig
 }
 
 func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger, config AgentRuntimeConfig) *TaskRuntime {
@@ -124,6 +124,10 @@ func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (
 		RunRoot:       req.ProjectRoot,
 		RunConfig:     req.RunConfig,
 		WorkspacePath: workspacePath,
+	}
+	if err := loadTaskHistory(ctx, &init, r.config); err != nil {
+		r.mu.Unlock()
+		return EnsureAgentResult{}, err
 	}
 	deps, err := buildAgentDeps(init, r.config)
 	if err != nil {

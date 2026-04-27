@@ -1,0 +1,63 @@
+package coder
+
+import (
+	"context"
+
+	"devflow/internal/agent/common"
+	"devflow/internal/artifact"
+	"devflow/internal/core"
+	"devflow/internal/llm"
+	"devflow/internal/logging"
+	"devflow/internal/runtime"
+)
+
+type Agent struct {
+	agentID        core.AgentID
+	runID          core.RunID
+	workspacePath  string
+	runConfig      core.RunConfig
+	taskHistory    []core.AgentTaskHistory
+	artifactStore  artifact.Store
+	llmClient      llm.Client
+	logger         logging.RunLogger
+	openCodeRunner common.OpenCodeRunner
+	gitManager     common.GitManager
+}
+
+func NewFactory() runtime.Agent {
+	return &Agent{}
+}
+
+func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.Agent {
+	return &Agent{
+		agentID:        init.AgentID,
+		runID:          init.RunID,
+		workspacePath:  init.WorkspacePath,
+		runConfig:      init.RunConfig,
+		taskHistory:    common.CloneTaskHistory(init.TaskHistory),
+		artifactStore:  deps.ArtifactStore,
+		llmClient:      deps.LLMClient,
+		logger:         deps.Logger,
+		openCodeRunner: common.NewManagedOpenCodeRunner(init.RunRoot),
+		gitManager:     common.NewLocalGitManager(),
+	}
+}
+
+func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	recipe, err := GetRecipe(task.Op)
+	if err != nil {
+		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
+	}
+	switch recipe.Op {
+	case "write_code":
+		return a.executeWriteCode(ctx, task, recipe)
+	default:
+		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
+	}
+}
+
+func (a *Agent) logStep(message string) {
+	if a.logger != nil {
+		_ = a.logger.Log(a.runID, "CoderAgent", message)
+	}
+}

@@ -3,7 +3,9 @@ package app
 import (
 	architectagent "devflow/internal/agent/architect"
 	ceoagent "devflow/internal/agent/ceo"
+	coderagent "devflow/internal/agent/coder"
 	pmagent "devflow/internal/agent/pm"
+	testeragent "devflow/internal/agent/tester"
 	"devflow/internal/artifact"
 	"devflow/internal/core"
 	"devflow/internal/llm"
@@ -76,7 +78,8 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 				return nil, fmt.Errorf("run %q has unsupported llm provider type %q", init.RunID, cfg.ProviderType)
 			}
 		},
-		Logger: runLogger,
+		TaskHistoryProvider: newTaskHistoryProvider(pipelineRegistry, runRepo, taskRepo),
+		Logger:              runLogger,
 	}
 	sessionRuntime := runtime.NewInMemorySessionRuntime(ceoagent.NewFactory(), runLogger, agentConfig)
 
@@ -89,8 +92,12 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 
 	pmFactory := pmagent.NewFactory()
 	architectFactory := architectagent.NewFactory()
+	coderFactory := coderagent.NewFactory()
+	testerFactory := testeragent.NewFactory()
 	taskRuntime.RegisterTemplate(core.AgentRolePM, pmFactory)
 	taskRuntime.RegisterTemplate(core.AgentRoleArchitect, architectFactory)
+	taskRuntime.RegisterTemplate(core.AgentRoleCoder, coderFactory)
+	taskRuntime.RegisterTemplate(core.AgentRoleTester, testerFactory)
 
 	runManager := orchestrator.NewRunManager(pipelineRegistry, runRepo, sessionRuntime, orch, projectsRoot, runLogger)
 

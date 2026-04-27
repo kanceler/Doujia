@@ -82,6 +82,16 @@ type TaskMetaData struct {
 	Control      []Control      `json:"control,omitempty"`
 }
 
+type AgentTaskHistory struct {
+	RunID              RunID      `json:"run_id"`
+	TaskID             TaskID     `json:"task_id"`
+	AgentID            AgentID    `json:"agent_id"`
+	Op                 string     `json:"op"`
+	Status             TaskStatus `json:"status"`
+	InputArtifactURIs  []string   `json:"input_artifact_uris,omitempty"`
+	OutputArtifactURIs []string   `json:"output_artifact_uris,omitempty"`
+}
+
 type RunConfig struct {
 	LLM LLMConfig
 }
@@ -95,14 +105,14 @@ type LLMConfig struct {
 }
 
 type PipelineRun struct {
-	ID          RunID
-	PipelineID  PipelineID
-	Status      RunStatus
-	ProjectDir  string
-	SessionID   SessionID
-	Config      RunConfig
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID         RunID
+	PipelineID PipelineID
+	Status     RunStatus
+	ProjectDir string
+	SessionID  SessionID
+	Config     RunConfig
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Task struct {
@@ -119,4 +129,3 @@ type Task struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
-

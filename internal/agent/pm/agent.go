@@ -14,7 +14,7 @@ type Agent struct {
 	agentID       core.AgentID
 	runID         core.RunID
 	workspacePath string
-	taskHistory   []core.TaskMetaData
+	taskHistory   []core.AgentTaskHistory
 	artifactStore artifact.Store
 	llmClient     llm.Client
 	logger        logging.RunLogger
@@ -38,8 +38,10 @@ func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.A
 
 func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	switch task.Op {
-	case "pm_write_plan":
+	case "write_plan", "pm_write_plan":
 		return a.executeWritePlan(ctx, task)
+	case "review_plan":
+		return a.executeReviewPlan(ctx, task)
 	case "pm_review_design":
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
 	default:
