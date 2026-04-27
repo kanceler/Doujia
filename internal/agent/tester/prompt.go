@@ -27,5 +27,14 @@ func buildPrompt(task core.TaskMetaData, recipe Recipe, docs []agentengine.Artif
 	}
 	builder.WriteString("\n# Instructions\n")
 	builder.WriteString(recipe.UserInstruction)
+	if strings.TrimSpace(recipe.OutputSchema) != "" {
+		builder.WriteString("\n\n# Output JSON Schema\n")
+		builder.WriteString(recipe.OutputSchema)
+		builder.WriteString("\n\n# Constraints\n")
+		builder.WriteString("1. Return exactly one JSON object.\n")
+		builder.WriteString("2. Do not use markdown code fences.\n")
+		builder.WriteString("3. artifact_outputs must include exactly one test_data file.\n")
+		builder.WriteString("4. filename must not contain path separators.\n")
+	}
 	return builder.String()
 }

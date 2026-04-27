@@ -1,0 +1,437 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DevFlow Agent 流程追踪</title>
+  <style>
+    :root {
+      --ink: #20211f;
+      --muted: #646a62;
+      --paper: #f7f2e8;
+      --panel: #fffaf0;
+      --line: #2c2f2a;
+      --ok: #1f7a4d;
+      --fail: #b8322b;
+      --skip: #8a6f2a;
+      --run: #1e5f8f;
+      --accent: #d64f2a;
+      --accent-2: #276f78;
+      --shadow: 0 18px 40px rgba(32, 33, 31, 0.14);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(32,33,31,.05) 1px, transparent 1px),
+        linear-gradient(0deg, rgba(32,33,31,.04) 1px, transparent 1px),
+        var(--paper);
+      background-size: 28px 28px;
+      font-family: Georgia, "Times New Roman", serif;
+      letter-spacing: 0;
+    }
+    button, input { font: inherit; letter-spacing: 0; }
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+    header {
+      border-bottom: 2px solid var(--line);
+      background: rgba(255, 250, 240, .92);
+      backdrop-filter: blur(10px);
+      padding: 18px 24px;
+      display: grid;
+      grid-template-columns: minmax(220px, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(26px, 4vw, 44px);
+      line-height: .95;
+      font-weight: 900;
+      text-transform: uppercase;
+    }
+    .subtitle {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      font-family: "Courier New", monospace;
+    }
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(220px, 360px) auto;
+      gap: 10px;
+      align-items: center;
+    }
+    .filebox {
+      border: 2px solid var(--line);
+      background: #fff;
+      padding: 10px;
+      min-width: 0;
+    }
+    input[type=file] { width: 100%; }
+    button {
+      border: 2px solid var(--line);
+      background: var(--accent);
+      color: white;
+      min-height: 46px;
+      padding: 0 18px;
+      cursor: pointer;
+      box-shadow: 5px 5px 0 var(--line);
+      transition: transform .12s ease, box-shadow .12s ease;
+    }
+    button:hover:not(:disabled) { transform: translate(2px, 2px); box-shadow: 3px 3px 0 var(--line); }
+    button:disabled { opacity: .55; cursor: wait; }
+    main {
+      display: grid;
+      grid-template-columns: 360px minmax(360px, 1fr) minmax(360px, 42vw);
+      gap: 16px;
+      padding: 18px;
+      min-height: 0;
+    }
+    section {
+      border: 2px solid var(--line);
+      background: rgba(255, 250, 240, .96);
+      box-shadow: var(--shadow);
+      min-height: 0;
+      overflow: hidden;
+    }
+    .section-title {
+      border-bottom: 2px solid var(--line);
+      padding: 12px 14px;
+      background: #efe5d0;
+      font-family: "Courier New", monospace;
+      font-weight: 700;
+      text-transform: uppercase;
+      font-size: 13px;
+    }
+    .timeline {
+      overflow: auto;
+      height: calc(100vh - 122px);
+    }
+    .step {
+      width: 100%;
+      text-align: left;
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      background: transparent;
+      color: var(--ink);
+      border: 0;
+      border-bottom: 1px solid rgba(32,33,31,.2);
+      box-shadow: none;
+      padding: 12px;
+      min-height: 74px;
+    }
+    .step:hover { background: #fff4dc; transform: none; box-shadow: none; }
+    .num {
+      width: 30px;
+      height: 30px;
+      border: 2px solid var(--line);
+      display: grid;
+      place-items: center;
+      font-family: "Courier New", monospace;
+      font-weight: 700;
+      background: #fff;
+    }
+    .step-title { font-weight: 800; font-size: 15px; }
+    .meta {
+      margin-top: 5px;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+    .badge {
+      display: inline-block;
+      border: 1px solid currentColor;
+      padding: 2px 6px;
+      margin-top: 7px;
+      font-family: "Courier New", monospace;
+      font-size: 11px;
+      text-transform: uppercase;
+    }
+    .ok { color: var(--ok); }
+    .failed { color: var(--fail); }
+    .skipped { color: var(--skip); }
+    .running { color: var(--run); }
+    .detail, .viewer {
+      height: calc(100vh - 122px);
+      overflow: auto;
+      padding: 16px;
+    }
+    .run-card {
+      border: 2px solid var(--line);
+      background: #fff;
+      padding: 12px;
+      margin-bottom: 14px;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .detail h2 {
+      margin: 0 0 8px;
+      font-size: 26px;
+      line-height: 1.05;
+    }
+    .files { display: grid; gap: 14px; margin-top: 16px; }
+    .file-group h3 {
+      margin: 0 0 8px;
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      text-transform: uppercase;
+    }
+    .artifact {
+      width: 100%;
+      display: block;
+      text-align: left;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      box-shadow: none;
+      padding: 9px;
+      min-height: auto;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .artifact:hover { transform: none; box-shadow: none; background: #e8f3f0; }
+    .viewer pre {
+      margin: 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      font-family: "Courier New", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .empty {
+      color: var(--muted);
+      font-style: italic;
+      line-height: 1.5;
+    }
+    .error {
+      margin-top: 10px;
+      border-left: 5px solid var(--fail);
+      padding: 8px 10px;
+      background: #ffe8e2;
+      font-family: "Courier New", monospace;
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 1050px) {
+      header { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr; }
+      main { grid-template-columns: 1fr; }
+      .timeline, .detail, .viewer { height: auto; max-height: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <div>
+        <h1>Agent 流程追踪</h1>
+        <div class="subtitle">本地演示服务 · 直接调用 Agent Execute · 查看中间产物</div>
+      </div>
+      <form class="controls" id="runForm">
+        <div class="filebox"><input id="fileInput" name="file" type="file" accept=".md,text/markdown,text/plain" required></div>
+        <button id="startButton" type="submit">开始执行流程</button>
+      </form>
+    </header>
+    <main>
+      <section>
+        <div class="section-title">执行流程</div>
+        <div class="timeline" id="timeline"><div class="detail empty">请选择 CEO 需求 Markdown 文件，然后开始执行。</div></div>
+      </section>
+      <section>
+        <div class="section-title">步骤详情</div>
+        <div class="detail" id="detail"><div class="empty">尚未选择步骤。</div></div>
+      </section>
+      <section>
+        <div class="section-title">产物查看器</div>
+        <div class="viewer" id="viewer"><div class="empty">点击输入或输出文件，查看对应的 Markdown 内容。</div></div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const form = document.getElementById('runForm');
+    const fileInput = document.getElementById('fileInput');
+    const startButton = document.getElementById('startButton');
+    const timeline = document.getElementById('timeline');
+    const detail = document.getElementById('detail');
+    const viewer = document.getElementById('viewer');
+    let currentRun = null;
+    let selectedStep = null;
+
+    loadLatestRun().catch(() => {});
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (!fileInput.files.length) return;
+      startButton.disabled = true;
+      startButton.textContent = '执行中...';
+      timeline.innerHTML = '<div class="detail empty">正在执行 Agent 流程。创建 git worktree 和产物可能需要几秒钟。</div>';
+      detail.innerHTML = '<div class="empty">正在等待流程输出。</div>';
+      viewer.innerHTML = '<div class="empty">流程开始产生产物后会显示在这里。</div>';
+      const data = new FormData();
+      data.append('file', fileInput.files[0]);
+      try {
+        const response = await fetch('/api/runs', { method: 'POST', body: data });
+        if (!response.ok) throw new Error(await response.text());
+        currentRun = await response.json();
+        selectedStep = currentRun.steps[0];
+        render();
+      } catch (error) {
+        timeline.innerHTML = `<div class="detail error">${escapeHTML(error.message)}</div>`;
+      } finally {
+        startButton.disabled = false;
+        startButton.textContent = '开始执行流程';
+      }
+    });
+
+    function render() {
+      renderTimeline();
+      renderDetail();
+    }
+
+    async function loadLatestRun() {
+      const response = await fetch('/api/runs');
+      if (!response.ok) return;
+      const runs = await response.json();
+      if (!Array.isArray(runs) || runs.length === 0) return;
+      currentRun = runs[0];
+      selectedStep = currentRun.steps.find(step => step.status === 'failed') || currentRun.steps[0] || null;
+      render();
+    }
+
+    function renderTimeline() {
+      const steps = currentRun?.steps || [];
+      timeline.innerHTML = steps.map(step => `
+        <button class="step" data-step="${step.index}">
+          <span class="num">${step.index}</span>
+          <span>
+            <span class="step-title">${escapeHTML(stepTitle(step.title))}</span>
+            <span class="meta">${escapeHTML(step.agent)} · ${escapeHTML(opLabel(step.op))}</span>
+            <span class="badge ${escapeHTML(step.status)}">${escapeHTML(statusLabel(step.status))}</span>
+          </span>
+        </button>
+      `).join('');
+      timeline.querySelectorAll('.step').forEach(button => {
+        button.addEventListener('click', () => {
+          selectedStep = steps.find(step => String(step.index) === button.dataset.step);
+          renderDetail();
+        });
+      });
+    }
+
+    function renderDetail() {
+      if (!currentRun || !selectedStep) {
+        detail.innerHTML = '<div class="empty">尚未选择步骤。</div>';
+        return;
+      }
+      const runCard = `
+        <div class="run-card">
+          <div><strong>运行 ID</strong> ${escapeHTML(currentRun.id)}</div>
+          <div><strong>仓库</strong> ${escapeHTML(currentRun.project_repo || '暂不可用')}</div>
+          <div><strong>分支</strong> ${escapeHTML(currentRun.git_branch || '暂不可用')}</div>
+          <div><strong>提交</strong> ${escapeHTML(currentRun.git_commit || '暂不可用')}</div>
+        </div>`;
+      detail.innerHTML = `
+        ${runCard}
+        <h2>${selectedStep.index}. ${escapeHTML(stepTitle(selectedStep.title))}</h2>
+        <div class="meta">agent=${escapeHTML(selectedStep.agent)} · op=${escapeHTML(selectedStep.op)} · 结果=${escapeHTML(resultLabel(selectedStep.result || selectedStep.status))}</div>
+        ${selectedStep.error ? `<div class="error">${escapeHTML(selectedStep.error)}</div>` : ''}
+        <div class="files">
+          ${renderFileGroup('输入产物', selectedStep.inputs || [])}
+          ${renderFileGroup('输出产物', selectedStep.outputs || [])}
+        </div>
+      `;
+      detail.querySelectorAll('.artifact').forEach(button => {
+        button.addEventListener('click', () => loadArtifact(button.dataset.uri));
+      });
+    }
+
+    function renderFileGroup(title, files) {
+      if (!files.length) return `<div class="file-group"><h3>${title}</h3><div class="empty">无文件。</div></div>`;
+      return `<div class="file-group"><h3>${title}</h3>${files.map(uri => `<button class="artifact" data-uri="${escapeHTML(uri)}">${escapeHTML(uri)}</button>`).join('')}</div>`;
+    }
+
+    async function loadArtifact(uri) {
+      viewer.innerHTML = `<div class="empty">正在加载 ${escapeHTML(uri)}</div>`;
+      try {
+        const params = new URLSearchParams({ run_id: currentRun.id, uri });
+        const response = await fetch('/api/artifacts?' + params.toString());
+        if (!response.ok) throw new Error(await response.text());
+        const artifact = await response.json();
+        viewer.innerHTML = `<pre>${escapeHTML(artifact.content)}</pre>`;
+      } catch (error) {
+        viewer.innerHTML = `<div class="error">${escapeHTML(error.message)}</div>`;
+      }
+    }
+
+    function stepTitle(title) {
+      return ({
+        'CEO imports requirement': 'CEO 导入需求',
+        'PM writes product plan': 'PM 编写产品方案',
+        'CEO reviews PM plan': 'CEO 审阅 PM 方案',
+        'Architect writes design': '架构师编写架构设计',
+        'PM reviews architecture': 'PM 审阅架构设计',
+        'CEO user confirm': 'CEO 用户确认',
+        'Architect splits modules': '架构师拆分模块',
+        'Coder writes code': '程序员编写代码',
+        'Tester writes test data': '测试员编写测试数据',
+        'Architect writes architecture test data': '架构师编写架构测试数据',
+        'Tester tests code': '测试员测试代码',
+        'Architect merges code': '架构师合并代码',
+        'Architect tests final code': '架构师测试最终代码'
+      })[title] || title;
+    }
+
+    function opLabel(op) {
+      return ({
+        write_plan: '编写方案',
+        review_plan: '审阅方案',
+        user_confirm: '用户确认',
+        split_module: '拆分模块',
+        write_code: '编写代码',
+        test_data: '编写测试数据',
+        test_code: '测试代码',
+        merge_code: '合并代码'
+      })[op] || op;
+    }
+
+    function statusLabel(status) {
+      return ({
+        pending: '等待中',
+        running: '执行中',
+        ok: '成功',
+        failed: '失败',
+        skipped: '已跳过'
+      })[status] || status;
+    }
+
+    function resultLabel(result) {
+      return ({
+        kok: '成功',
+        kfail: '失败',
+        skipped: '已跳过',
+        ok: '成功',
+        failed: '失败'
+      })[result] || result;
+    }
+
+    function escapeHTML(value) {
+      return String(value ?? '').replace(/[&<>"']/g, char => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#039;'
+      }[char]));
+    }
+  </script>
+</body>
+</html>

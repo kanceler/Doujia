@@ -93,6 +93,9 @@ func openCodeArgs(req OpenCodeRequest) []string {
 	if model := codingAgentModel(req); model != "" {
 		args = append(args, "--model", model)
 	}
+	if strings.TrimSpace(os.Getenv("DEVFLOW_FAKE_OPENCODE")) == "1" {
+		return args
+	}
 	args = append(args, req.Prompt)
 	return args
 }

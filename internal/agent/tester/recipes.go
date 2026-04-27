@@ -9,6 +9,7 @@ type Recipe struct {
 	OutputKind       string
 	SystemPrompt     string
 	UserInstruction  string
+	OutputSchema     string
 	ResultFilename   string
 	MaxContextChars  int
 }
@@ -18,27 +19,32 @@ func GetRecipe(op string) (Recipe, error) {
 	case "test_data":
 		return Recipe{
 			Op:          "test_data",
-			Description: "Generate test data for an assigned module or architecture document.",
+			Description: "Generate unit test data for the tester task and its paired programmer module task.",
 			RequiredURIHints: []string{
+				"/artifacts/tests/",
 				"/artifacts/modules/",
 			},
-			OutputKind:      "test_data",
-			SystemPrompt:    "You are a DevFlow Tester Agent. You design focused test data and test cases for assigned work.",
-			UserInstruction: "Generate test data for the provided task. This op is not implemented yet.",
+			OutputKind:   "test_data",
+			SystemPrompt: "You are a DevFlow Tester Agent. You design focused unit test data for one paired programmer module task.",
+			UserInstruction: `Generate test data from the provided tester task and paired programmer module task.
+Focus on test data only; do not require git branch metadata and do not write executable tests.
+The markdown content must include: document basis, pairing metadata, unit test data, boundary and error data, and an acceptance matrix.`,
+			OutputSchema:    `{"summary":"short summary","artifact_outputs":[{"type":"test_data","filename":"test_data.md","content":"markdown test data"}],"control":[]}`,
 			ResultFilename:  "test_data.md",
 			MaxContextChars: 20000,
 		}, nil
 	case "test_code":
 		return Recipe{
 			Op:          "test_code",
-			Description: "Run and analyze tests for a coder branch using module task and test data artifacts.",
+			Description: "Use OpenCode to test a coder branch against the paired module task and generated unit test data.",
 			RequiredURIHints: []string{
 				"/artifacts/modules/",
 				"/artifacts/branches/",
+				"/artifacts/test_data/",
 			},
 			OutputKind:      "test_reports",
 			SystemPrompt:    "You are a DevFlow Tester Agent. You verify coder branches and report bugs without changing product code.",
-			UserInstruction: "Run and analyze tests for the provided coder branch. This op is not implemented yet.",
+			UserInstruction: "Run tests in the provided worktree using the module task and test data. Do not commit or merge. Write .devflow/result.json with the required verification result.",
 			ResultFilename:  "test_report.md",
 			MaxContextChars: 20000,
 		}, nil

@@ -12,12 +12,14 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type Agent struct {
 	agentID       core.AgentID
 	runID         core.RunID
 	workspacePath string
+	historyMu     sync.Mutex
 	taskHistory   []core.AgentTaskHistory
 	artifactStore artifact.Store
 	llmClient     llm.Client
@@ -40,7 +42,11 @@ func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.A
 	}
 }
 
-func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (feedback core.TaskMetaData, err error) {
+	defer func() {
+		a.recordTaskHistory(task, feedback, err)
+	}()
+
 	if task.Direction != core.TaskDirectionDispatch {
 		return core.TaskMetaData{}, fmt.Errorf("unsupported direction %q: only dispatch can be executed", task.Direction)
 	}
@@ -52,18 +58,32 @@ func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskM
 	}
 
 	switch task.Op {
-	case "ceo_write_requirement":
+	case "write_plan", "ceo_write_requirement":
 		return a.executeWriteRequirement(ctx, task)
-	case "ceo_review_plan", "ceo_user_confirm":
+	case "review_plan", "ceo_review_plan", "user_confirm", "ceo_user_confirm":
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
 	default:
 		return core.TaskMetaData{}, fmt.Errorf("unsupported ceo op %q", task.Op)
 	}
 }
 
+func (a *Agent) recordTaskHistory(task core.TaskMetaData, feedback core.TaskMetaData, err error) {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+
+	a.taskHistory = append(a.taskHistory, common.NewTaskHistoryItem(task, feedback, a.agentID, err))
+}
+
 func (a *Agent) executeWriteRequirement(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "requirement", "requirement_v1.md")
 	content := "# Requirement\n\n我需要制作一个贪吃蛇软件\n"
+	if a.artifactStore != nil && len(task.ArtifactURIs) > 0 {
+		input, err := a.artifactStore.Read(ctx, task.ArtifactURIs[0])
+		if err != nil {
+			return core.TaskMetaData{}, fmt.Errorf("read CEO write_plan input: %w", err)
+		}
+		content = string(input)
+	}
 	if a.artifactStore != nil {
 		if err := a.artifactStore.Write(ctx, outputURI, []byte(content)); err != nil {
 			return core.TaskMetaData{}, err

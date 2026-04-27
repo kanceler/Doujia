@@ -16,7 +16,7 @@ import (
 	"devflow/internal/llm"
 )
 
-const splitModuleStrategy = "one_coder_per_module_tester_can_cover_multiple"
+const splitModuleStrategy = "one_coder_one_tester_per_module"
 
 type runSplitConfig struct {
 	MainBranch         string            `json:"main_branch"`
@@ -171,6 +171,9 @@ func parseRunSplitConfig(raw string) (runSplitConfig, error) {
 	}
 	if cfg.TesterAgents <= 0 {
 		return runSplitConfig{}, fmt.Errorf("run config tester_agents must be greater than zero")
+	}
+	if cfg.TesterAgents != cfg.CoderAgents {
+		return runSplitConfig{}, fmt.Errorf("run config tester_agents must equal coder_agents for one-to-one pairing")
 	}
 	if cfg.MaxModules <= 0 {
 		cfg.MaxModules = cfg.CoderAgents
@@ -339,16 +342,16 @@ func buildSplitModulePrompt(inputs splitModuleInputs) string {
 	builder.WriteString(fmt.Sprintf("- max_modules: %d\n", cfg.MaxModules))
 	builder.WriteString("- Split modules so different programmers can work independently.\n")
 	builder.WriteString("- Every programmer task must include clear interface contracts, shared data types, dependencies, file/directory ownership, forbidden changes, and integration notes.\n")
-	builder.WriteString("- Tester tasks may cover multiple modules when tester count is lower than module count.\n")
+	builder.WriteString("- Every tester task must map to exactly one programmer task with the same 1-based index.\n")
 	builder.WriteString("- Do not invent technology choices that are not implied by the architecture. Mark unknown choices as undecided.\n\n")
 	builder.WriteString("# Output JSON Schema\n")
-	builder.WriteString(`{"modules":[{"id":"safe_id","name":"ModuleName","goal":"...","scope":["..."],"out_of_scope":["..."],"inputs":["..."],"outputs":["..."],"dependencies":["..."],"interfaces":["..."],"shared_types":["..."],"developer_notes":["..."],"tester_notes":["..."]}],"coder_tasks":[{"agent_name":"coder_module_id","module_id":"module_id","title":"程序员任务书：ModuleName","content":"complete markdown task document"}],"tester_tasks":[{"agent_name":"tester_01","module_ids":["module_id"],"title":"测试员任务书：tester_01","content":"complete markdown task document"}]}`)
+	builder.WriteString(`{"modules":[{"id":"safe_id","name":"ModuleName","goal":"...","scope":["..."],"out_of_scope":["..."],"inputs":["..."],"outputs":["..."],"dependencies":["..."],"interfaces":["..."],"shared_types":["..."],"developer_notes":["..."],"tester_notes":["..."]}],"coder_tasks":[{"agent_name":"coder_01","module_id":"module_id","title":"programmer task: ModuleName","content":"complete markdown task document"}],"tester_tasks":[{"agent_name":"tester_01","module_id":"module_id","title":"tester task: tester_01","content":"complete markdown task document"}]}`)
 	builder.WriteString("\n\n# Constraints\n")
 	builder.WriteString("1. Return exactly one JSON object.\n")
 	builder.WriteString("2. Do not use markdown code fences.\n")
 	builder.WriteString("3. modules count must not exceed max_modules or coder_agents.\n")
 	builder.WriteString("4. coder_tasks count must equal modules count.\n")
-	builder.WriteString("5. tester_tasks count must equal tester_agents.\n")
+	builder.WriteString("5. tester_tasks count must equal coder_tasks count.\n")
 	builder.WriteString("6. module ids must use lowercase letters, digits, underscores, or hyphens only.\n")
 	return builder.String()
 }
@@ -456,13 +459,11 @@ func normalizeCoderTasks(plan splitModulePlan, cfg runSplitConfig) []splitAgentT
 		byModule[task.ModuleID] = task
 	}
 	tasks := make([]splitAgentTaskDocument, 0, len(plan.Modules))
-	for _, module := range plan.Modules {
+	for i, module := range plan.Modules {
 		task := byModule[module.ID]
 		task.ModuleID = module.ID
 		task.ModuleIDs = nil
-		if strings.TrimSpace(task.AgentName) == "" {
-			task.AgentName = cfg.AgentNamePrefix["coder"] + "_" + module.ID
-		}
+		task.AgentName = fmt.Sprintf("%s_%02d", cfg.AgentNamePrefix["coder"], i+1)
 		if strings.TrimSpace(task.Title) == "" {
 			task.Title = "程序员任务书：" + module.Name
 		}
@@ -475,25 +476,35 @@ func normalizeCoderTasks(plan splitModulePlan, cfg runSplitConfig) []splitAgentT
 }
 
 func normalizeTesterTasks(plan splitModulePlan, cfg runSplitConfig) []splitAgentTaskDocument {
+	byModule := map[string]splitAgentTaskDocument{}
 	byAgent := map[string]splitAgentTaskDocument{}
 	for _, task := range plan.TesterTasks {
+		task.ModuleID = sanitizeID(task.ModuleID)
+		if task.ModuleID == "" && len(task.ModuleIDs) == 1 {
+			task.ModuleID = sanitizeID(task.ModuleIDs[0])
+		}
+		if task.ModuleID != "" {
+			byModule[task.ModuleID] = task
+		}
 		if strings.TrimSpace(task.AgentName) != "" {
 			byAgent[task.AgentName] = task
 		}
 	}
-	assignments := assignModulesToTesters(plan.Modules, cfg.TesterAgents, cfg.AgentNamePrefix["tester"])
-	tasks := make([]splitAgentTaskDocument, 0, cfg.TesterAgents)
-	for i := 0; i < cfg.TesterAgents; i++ {
+	tasks := make([]splitAgentTaskDocument, 0, len(plan.Modules))
+	for i, module := range plan.Modules {
 		agentName := fmt.Sprintf("%s_%02d", cfg.AgentNamePrefix["tester"], i+1)
-		task := byAgent[agentName]
+		task := byModule[module.ID]
+		if strings.TrimSpace(task.Content) == "" && strings.TrimSpace(byAgent[agentName].Content) != "" {
+			task = byAgent[agentName]
+		}
 		task.AgentName = agentName
-		task.ModuleID = ""
-		task.ModuleIDs = assignments[agentName]
+		task.ModuleID = module.ID
+		task.ModuleIDs = nil
 		if strings.TrimSpace(task.Title) == "" {
 			task.Title = "测试员任务书：" + agentName
 		}
 		if strings.TrimSpace(task.Content) == "" {
-			task.Content = buildTesterTaskContent(agentName, assignedModuleDefs(plan.Modules, task.ModuleIDs), cfg.MainBranch)
+			task.Content = buildTesterTaskContent(agentName, []splitModuleDefinition{module}, cfg.MainBranch)
 		}
 		tasks = append(tasks, task)
 	}
@@ -564,19 +575,35 @@ func fallbackSplitModulePlan(inputs splitModuleInputs) splitModulePlan {
 
 func (a *Agent) writeSplitTaskArtifacts(ctx context.Context, inputs splitModuleInputs, plan splitModulePlan, mainBranchURI string) (map[string]string, error) {
 	taskURIs := map[string]string{}
-	basis := append([]string{}, inputs.basisURIs...)
-	basis = append(basis, mainBranchURI)
+	coderBasis := append([]string{}, inputs.basisURIs...)
+	coderBasis = append(coderBasis, mainBranchURI)
+	testerByModule := splitTasksByModule(plan.TesterTasks)
 	for _, task := range plan.CoderTasks {
 		uri := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "modules", task.AgentName+"_task.md")
-		content := prependDocumentBasis(task.Content, basis)
+		testerName := ""
+		if testerTask, ok := testerByModule[task.ModuleID]; ok {
+			testerName = testerTask.AgentName
+		}
+		content := prependDocumentBasis(prependCoderPairingMetadata(task.Content, task.ModuleID, task.AgentName, testerName), coderBasis)
 		if err := a.artifactStore.Write(ctx, uri, []byte(content)); err != nil {
 			return nil, fmt.Errorf("write coder task %s: %w", task.AgentName, err)
 		}
 		taskURIs[task.AgentName] = uri
 	}
+	coderByModule := splitTasksByModule(plan.CoderTasks)
 	for _, task := range plan.TesterTasks {
 		uri := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "tests", task.AgentName+"_task.md")
-		content := prependDocumentBasis(task.Content, basis)
+		coderTask, ok := coderByModule[task.ModuleID]
+		if !ok {
+			return nil, fmt.Errorf("missing paired coder task for tester %s module %s", task.AgentName, task.ModuleID)
+		}
+		moduleTaskURI := taskURIs[coderTask.AgentName]
+		if moduleTaskURI == "" {
+			return nil, fmt.Errorf("missing paired coder artifact for tester %s module %s", task.AgentName, task.ModuleID)
+		}
+		testerBasis := append([]string{}, inputs.basisURIs...)
+		testerBasis = append(testerBasis, moduleTaskURI)
+		content := prependDocumentBasis(prependTesterPairingMetadata(task.Content, task.ModuleID, coderTask.AgentName, task.AgentName, moduleTaskURI), testerBasis)
 		if err := a.artifactStore.Write(ctx, uri, []byte(content)); err != nil {
 			return nil, fmt.Errorf("write tester task %s: %w", task.AgentName, err)
 		}
@@ -587,6 +614,7 @@ func (a *Agent) writeSplitTaskArtifacts(ctx context.Context, inputs splitModuleI
 
 func buildSplitControls(plan splitModulePlan, taskURIs map[string]string, mainBranchURI string) ([]core.Control, error) {
 	controls := make([]core.Control, 0, len(plan.CoderTasks)+len(plan.TesterTasks))
+	coderByModule := splitTasksByModule(plan.CoderTasks)
 	for _, task := range plan.CoderTasks {
 		uri := taskURIs[task.AgentName]
 		if uri == "" {
@@ -603,13 +631,64 @@ func buildSplitControls(plan splitModulePlan, taskURIs map[string]string, mainBr
 		if uri == "" {
 			return nil, fmt.Errorf("missing tester task artifact for %s", task.AgentName)
 		}
+		coderTask, ok := coderByModule[task.ModuleID]
+		if !ok {
+			return nil, fmt.Errorf("missing paired coder task for tester %s module %s", task.AgentName, task.ModuleID)
+		}
+		coderURI := taskURIs[coderTask.AgentName]
+		if coderURI == "" {
+			return nil, fmt.Errorf("missing paired coder task artifact for tester %s", task.AgentName)
+		}
 		controls = append(controls, core.Control{
 			Type:         core.ControlTypeNewTester,
 			AgentName:    task.AgentName,
-			ArtifactURIs: []string{uri, mainBranchURI},
+			ArtifactURIs: []string{uri, coderURI},
 		})
 	}
 	return controls, nil
+}
+
+func splitTasksByModule(tasks []splitAgentTaskDocument) map[string]splitAgentTaskDocument {
+	byModule := make(map[string]splitAgentTaskDocument, len(tasks))
+	for _, task := range tasks {
+		if strings.TrimSpace(task.ModuleID) == "" {
+			continue
+		}
+		byModule[task.ModuleID] = task
+	}
+	return byModule
+}
+
+func prependCoderPairingMetadata(content, moduleID, coderAgent, testerAgent string) string {
+	var builder strings.Builder
+	builder.WriteString("## Pairing Metadata\n\n")
+	builder.WriteString("- module_id: ")
+	builder.WriteString(moduleID)
+	builder.WriteString("\n- coder_agent: ")
+	builder.WriteString(coderAgent)
+	if strings.TrimSpace(testerAgent) != "" {
+		builder.WriteString("\n- paired_tester_agent: ")
+		builder.WriteString(testerAgent)
+	}
+	builder.WriteString("\n\n")
+	builder.WriteString(strings.TrimLeft(content, "\r\n"))
+	return builder.String()
+}
+
+func prependTesterPairingMetadata(content, moduleID, coderAgent, testerAgent, moduleTaskURI string) string {
+	var builder strings.Builder
+	builder.WriteString("## Pairing Metadata\n\n")
+	builder.WriteString("- module_id: ")
+	builder.WriteString(moduleID)
+	builder.WriteString("\n- tester_agent: ")
+	builder.WriteString(testerAgent)
+	builder.WriteString("\n- paired_coder_agent: ")
+	builder.WriteString(coderAgent)
+	builder.WriteString("\n- module_task_uri: ")
+	builder.WriteString(moduleTaskURI)
+	builder.WriteString("\n\n")
+	builder.WriteString(strings.TrimLeft(content, "\r\n"))
+	return builder.String()
 }
 
 func buildMainBranchDocument(runID core.RunID, info gitMainBranchInfo, inputs splitModuleInputs) string {
@@ -680,10 +759,9 @@ func buildTesterTaskContent(agentName string, modules []splitModuleDefinition, m
 		}
 		builder.WriteString("\n")
 	}
-	builder.WriteString("## Git 要求\n\n")
-	builder.WriteString("- 基于主分支 ")
-	builder.WriteString(mainBranch)
-	builder.WriteString(" 和对应 coder 分支进行测试。\n")
+	builder.WriteString("## Test Data Requirements\n\n")
+	builder.WriteString("- Generate unit test data from the paired tester task and programmer module task.\n")
+	builder.WriteString("- Do not require git branch metadata for test_data.\n")
 	return builder.String()
 }
 

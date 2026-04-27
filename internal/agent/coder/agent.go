@@ -2,6 +2,7 @@ package coder
 
 import (
 	"context"
+	"sync"
 
 	"devflow/internal/agent/common"
 	"devflow/internal/artifact"
@@ -16,6 +17,7 @@ type Agent struct {
 	runID          core.RunID
 	workspacePath  string
 	runConfig      core.RunConfig
+	historyMu      sync.Mutex
 	taskHistory    []core.AgentTaskHistory
 	artifactStore  artifact.Store
 	llmClient      llm.Client
@@ -43,7 +45,11 @@ func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.A
 	}
 }
 
-func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (feedback core.TaskMetaData, err error) {
+	defer func() {
+		a.recordTaskHistory(task, feedback, err)
+	}()
+
 	recipe, err := GetRecipe(task.Op)
 	if err != nil {
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
@@ -51,9 +57,18 @@ func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskM
 	switch recipe.Op {
 	case "write_code":
 		return a.executeWriteCode(ctx, task, recipe)
+	case "debug":
+		return a.executeDebug(ctx, task, recipe)
 	default:
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
 	}
+}
+
+func (a *Agent) recordTaskHistory(task core.TaskMetaData, feedback core.TaskMetaData, err error) {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+
+	a.taskHistory = append(a.taskHistory, common.NewTaskHistoryItem(task, feedback, a.agentID, err))
 }
 
 func (a *Agent) logStep(message string) {

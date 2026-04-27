@@ -69,6 +69,45 @@ func (a *Agent) executeWritePlan(ctx context.Context, task core.TaskMetaData) (c
 	return agentengine.BuildFeedback(task, uris, output), nil
 }
 
+func (a *Agent) executeReplan(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	if a.artifactStore == nil {
+		a.logStep("pm_replan fallback: artifact store is nil")
+		return a.executeReplanFallback(task, replanInputs{})
+	}
+
+	inputs, err := a.resolveReplanInputs(ctx, task.ArtifactURIs)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	prompt := buildReplanPrompt(task, inputs)
+	a.logStep(fmt.Sprintf("pm_replan llm request start: inputs=%d prompt_chars=%d", len(task.ArtifactURIs), len(prompt)))
+
+	raw, err := a.llmClient.Complete(ctx, prompt)
+	if err != nil {
+		a.logStep(fmt.Sprintf("pm_replan llm request failed: %v", err))
+		if !llm.IsNoop(a.llmClient) {
+			return core.TaskMetaData{}, fmt.Errorf("pm_replan llm request failed: %w", err)
+		}
+		return a.executeReplanFallback(task, inputs)
+	}
+	a.logStep(fmt.Sprintf("pm_replan llm request success: chars=%d", len(raw)))
+	output, err := agentengine.ParseModelOutput(raw)
+	if err != nil {
+		a.logStep(fmt.Sprintf("pm_replan parse model output failed: %v", err))
+		if !llm.IsNoop(a.llmClient) {
+			return core.TaskMetaData{}, fmt.Errorf("pm_replan parse model output failed: %w", err)
+		}
+		return a.executeReplanFallback(task, inputs)
+	}
+	output = addDocumentBasisToModelOutput(output, replanBasisURIs(task.ArtifactURIs, inputs.previousPlanURI))
+	uris, err := agentengine.WriteArtifacts(ctx, a.artifactStore, a.runID, a.agentID, "prd", output)
+	if err != nil {
+		return core.TaskMetaData{}, fmt.Errorf("write replan artifact outputs: %w", err)
+	}
+	a.logStep(fmt.Sprintf("pm_replan artifact write success: outputs=%d", len(uris)))
+	return agentengine.BuildFeedback(task, uris, output), nil
+}
+
 func (a *Agent) executeReviewPlan(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	docs, err := a.resolveReviewPlanInputs(ctx, task.ArtifactURIs)
 	if err != nil {
@@ -132,6 +171,160 @@ func (a *Agent) executeReviewPlan(ctx context.Context, task core.TaskMetaData) (
 type reviewPlanDocs struct {
 	prd    string
 	design string
+}
+
+type replanInputs struct {
+	requirementURI  string
+	requirement     string
+	reviewURI       string
+	review          string
+	previousPlanURI string
+	previousPlan    string
+}
+
+func (a *Agent) resolveReplanInputs(ctx context.Context, uris []string) (replanInputs, error) {
+	var inputs replanInputs
+	for _, uri := range uris {
+		normalized := filepath.ToSlash(strings.TrimSpace(uri))
+		if normalized == "" {
+			continue
+		}
+		content, err := a.artifactStore.Read(ctx, normalized)
+		if err != nil {
+			return replanInputs{}, fmt.Errorf("read artifact %s: %w", normalized, err)
+		}
+		switch {
+		case isRequirementArtifactURI(normalized):
+			inputs.requirementURI = normalized
+			inputs.requirement = string(content)
+		case isReviewArtifactURI(normalized):
+			inputs.reviewURI = normalized
+			inputs.review = string(content)
+		}
+	}
+	if strings.TrimSpace(inputs.requirement) == "" {
+		return replanInputs{}, fmt.Errorf("replan requires requirement artifact")
+	}
+	if strings.TrimSpace(inputs.review) == "" {
+		return replanInputs{}, fmt.Errorf("replan requires review artifact")
+	}
+
+	previousPlanURI := a.lastPlanArtifactURI()
+	if previousPlanURI == "" {
+		return inputs, nil
+	}
+	content, err := a.artifactStore.Read(ctx, previousPlanURI)
+	if err != nil {
+		a.logStep(fmt.Sprintf("pm_replan previous plan read skipped: uri=%s err=%v", previousPlanURI, err))
+		return inputs, nil
+	}
+	inputs.previousPlanURI = previousPlanURI
+	inputs.previousPlan = string(content)
+	return inputs, nil
+}
+
+func (a *Agent) lastPlanArtifactURI() string {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+
+	for i := len(a.taskHistory) - 1; i >= 0; i-- {
+		item := a.taskHistory[i]
+		if item.Status != core.TaskStatusDone {
+			continue
+		}
+		if !isPlanProducingOp(item.Op) {
+			continue
+		}
+		for j := len(item.OutputArtifactURIs) - 1; j >= 0; j-- {
+			uri := filepath.ToSlash(strings.TrimSpace(item.OutputArtifactURIs[j]))
+			if isPlanArtifactURI(uri) {
+				return uri
+			}
+		}
+	}
+	return ""
+}
+
+func isPlanProducingOp(op string) bool {
+	switch strings.TrimSpace(op) {
+	case "write_plan", "pm_write_plan", "replan":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRequirementArtifactURI(uri string) bool {
+	return strings.Contains(strings.ToLower(filepath.ToSlash(uri)), "/artifacts/requirement/")
+}
+
+func isReviewArtifactURI(uri string) bool {
+	lower := strings.ToLower(filepath.ToSlash(uri))
+	return strings.Contains(lower, "/artifacts/review/") || strings.Contains(lower, "replan_instruction")
+}
+
+func isPlanArtifactURI(uri string) bool {
+	lower := strings.ToLower(filepath.ToSlash(uri))
+	return strings.Contains(lower, "/artifacts/prd/") || strings.Contains(lower, "/artifacts/plan/")
+}
+
+func buildReplanPrompt(task core.TaskMetaData, inputs replanInputs) string {
+	var builder strings.Builder
+	builder.WriteString("# Role\n")
+	builder.WriteString("You are a PM Agent. 当前任务是 replan，需要根据 CEO 原始需求、CEO review 指导书和上一版 PM plan 生成修订后的产品计划。\n\n")
+	builder.WriteString("# Task\n")
+	builder.WriteString(fmt.Sprintf("task_id: %s\n", task.TaskID))
+	builder.WriteString(fmt.Sprintf("agent_id: %s\n", task.AgentID))
+	builder.WriteString("op: replan\n\n")
+
+	writePromptDoc(&builder, "CEO 原始需求书", inputs.requirementURI, inputs.requirement)
+	writePromptDoc(&builder, "CEO review/replan 指导书", inputs.reviewURI, inputs.review)
+	if strings.TrimSpace(inputs.previousPlan) == "" {
+		builder.WriteString("## 上一版 PM plan\n\n")
+		builder.WriteString("未找到可读取的上一版 PM plan，请直接基于 CEO 原始需求和 review 指导书生成完整新版产品计划。\n\n")
+	} else {
+		writePromptDoc(&builder, "上一版 PM plan", inputs.previousPlanURI, inputs.previousPlan)
+	}
+
+	builder.WriteString("# Instructions\n")
+	builder.WriteString("1. CEO 原始需求书是事实源头。\n")
+	builder.WriteString("2. CEO review/replan 指导书是本轮必须解决的问题。\n")
+	builder.WriteString("3. 上一版 PM plan 仅作为修订基础；如与 CEO 原始需求或 review 冲突，以 CEO 原始需求和 review 为准。\n")
+	builder.WriteString("4. 输出必须是一份完整的新产品计划/PRD，不要只输出 diff、补丁或说明。\n")
+	builder.WriteString("5. 必须逐条回应 review 指导书中的问题，并把修订落实到后续需求、验收标准或范围约束中。\n")
+	builder.WriteString("6. 内容应继续面向架构师消费，覆盖目标、用户场景、功能需求、非功能约束、风险提示和验收标准。\n\n")
+	builder.WriteString("# Output JSON Schema\n")
+	builder.WriteString(`{"summary":"short summary","artifact_outputs":[{"type":"prd","filename":"plan_v2.md","content":"markdown content"}],"control":[]}`)
+	builder.WriteString("\n\n# Constraints\n")
+	builder.WriteString("1. Return exactly one JSON object.\n")
+	builder.WriteString("2. Do not use markdown code fences.\n")
+	builder.WriteString("3. artifact_outputs must include at least one file.\n")
+	builder.WriteString("4. filename must not contain path separators.\n")
+	return builder.String()
+}
+
+func writePromptDoc(builder *strings.Builder, title, uri, content string) {
+	builder.WriteString("## ")
+	builder.WriteString(title)
+	builder.WriteString("\n\nsource: ")
+	builder.WriteString(uri)
+	builder.WriteString("\n\n")
+	builder.WriteString(strings.TrimSpace(content))
+	builder.WriteString("\n\n")
+}
+
+func replanBasisURIs(inputURIs []string, previousPlanURI string) []string {
+	basis := append([]string(nil), inputURIs...)
+	previousPlanURI = strings.TrimSpace(previousPlanURI)
+	if previousPlanURI == "" {
+		return basis
+	}
+	for _, uri := range basis {
+		if filepath.ToSlash(strings.TrimSpace(uri)) == filepath.ToSlash(previousPlanURI) {
+			return basis
+		}
+	}
+	return append(basis, previousPlanURI)
 }
 
 func (a *Agent) resolveReviewPlanInputs(ctx context.Context, uris []string) (reviewPlanDocs, error) {
@@ -300,6 +493,27 @@ func (a *Agent) executeWritePlanFallback(task core.TaskMetaData) (core.TaskMetaD
 	output, err := common.WriteAgentOutput(
 		a.workspacePath,
 		filepath.Join("artifacts", "plan", "plan_v1.md"),
+		content,
+	)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
+}
+
+func (a *Agent) executeReplanFallback(task core.TaskMetaData, inputs replanInputs) (core.TaskMetaData, error) {
+	a.logStep("pm_replan fallback output used")
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "prd", "plan_v2.md")
+	content := prependDocumentBasis("# 产品需求文档（Replan）\n\n## 说明\n\n当前未通过真实 LLM 生成完整 replan 产品细节。\n", replanBasisURIs(task.ArtifactURIs, inputs.previousPlanURI))
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(context.Background(), outputURI, []byte(content)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+	}
+	output, err := common.WriteAgentOutput(
+		a.workspacePath,
+		filepath.Join("artifacts", "prd", "plan_v2.md"),
 		content,
 	)
 	if err != nil {

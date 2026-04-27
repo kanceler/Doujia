@@ -52,6 +52,23 @@ func ParseBranchArtifact(content []byte) (BranchArtifact, error) {
 	return artifact, nil
 }
 
+func ParseCoderBranchArtifact(content []byte) (CoderBranchArtifact, error) {
+	var artifact CoderBranchArtifact
+	if err := json.Unmarshal(content, &artifact); err != nil {
+		return CoderBranchArtifact{}, fmt.Errorf("parse coder branch artifact json: %w", err)
+	}
+	if strings.TrimSpace(artifact.RepoDir) == "" {
+		return CoderBranchArtifact{}, fmt.Errorf("coder branch artifact repo_dir is required")
+	}
+	if strings.TrimSpace(artifact.Branch) == "" {
+		return CoderBranchArtifact{}, fmt.Errorf("coder branch artifact branch is required")
+	}
+	if strings.TrimSpace(artifact.Commit) == "" {
+		return CoderBranchArtifact{}, fmt.Errorf("coder branch artifact commit is required")
+	}
+	return artifact, nil
+}
+
 func MarshalJSONArtifact(value any) ([]byte, error) {
 	content, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {

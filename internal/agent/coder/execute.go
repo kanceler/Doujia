@@ -23,6 +23,12 @@ type openCodeExecutionReport struct {
 	TestPassed   bool     `json:"test_passed"`
 }
 
+type debugInputs struct {
+	moduleDoc  agentengine.ArtifactDocument
+	branchDoc  agentengine.ArtifactDocument
+	failureDoc agentengine.ArtifactDocument
+}
+
 func (a *Agent) executeWriteCode(ctx context.Context, task core.TaskMetaData, recipe Recipe) (core.TaskMetaData, error) {
 	start := time.Now()
 	if a.artifactStore == nil {
@@ -99,6 +105,9 @@ func (a *Agent) executeWriteCode(ctx context.Context, task core.TaskMetaData, re
 	if testCommand == "" {
 		testCommand = "go test ./..."
 	}
+	if err := validateTestCommand(testCommand); err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
 	testResult, err := a.gitManager.RunTestCommand(ctx, worktree.Path, testCommand)
 	if err != nil {
 		return a.failureFeedback(ctx, task, fmt.Errorf("test command failed: %w", err), start), nil
@@ -142,6 +151,114 @@ func (a *Agent) executeWriteCode(ctx context.Context, task core.TaskMetaData, re
 	return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
 }
 
+func (a *Agent) executeDebug(ctx context.Context, task core.TaskMetaData, recipe Recipe) (core.TaskMetaData, error) {
+	start := time.Now()
+	if a.artifactStore == nil {
+		return core.TaskMetaData{}, fmt.Errorf("coder artifact store is nil")
+	}
+	if a.openCodeRunner == nil {
+		a.openCodeRunner = common.NewManagedOpenCodeRunner("")
+	}
+	if a.gitManager == nil {
+		a.gitManager = common.NewLocalGitManager()
+	}
+
+	env, err := agentengine.ParseTask(task)
+	if err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
+	docs, err := agentengine.ResolveArtifacts(ctx, a.artifactStore, env.InputArtifacts)
+	if err != nil {
+		return a.failureFeedback(ctx, task, fmt.Errorf("resolve artifacts: %w", err), start), nil
+	}
+	inputs, err := findDebugInputs(docs, recipe)
+	if err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
+	branchInfo, err := common.ParseCoderBranchArtifact([]byte(inputs.branchDoc.Content))
+	if err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
+	worktreePath := filepath.FromSlash(strings.TrimSpace(branchInfo.Worktree))
+	if worktreePath == "" {
+		return a.failureFeedback(ctx, task, fmt.Errorf("debug requires coder_branch artifact worktree"), start), nil
+	}
+
+	testCommand := debugTestCommand(inputs.failureDoc.Content, branchInfo, openCodeExecutionReport{})
+	prompt := buildDebugPrompt(task, recipe, inputs, branchInfo, testCommand)
+	a.logStep(fmt.Sprintf("debug coding agent request start: worktree=%s prompt_chars=%d", worktreePath, len(prompt)))
+	codingAgentResult, err := a.openCodeRunner.Run(ctx, common.OpenCodeRequest{
+		WorkDir: worktreePath,
+		Prompt:  prompt,
+		Model:   a.runConfig.LLM.Model,
+		LLM:     a.runConfig.LLM,
+		Timeout: a.runConfig.LLM.RequestTimeout,
+	})
+	if err != nil {
+		return a.failureFeedback(ctx, task, fmt.Errorf("debug coding agent run: %w", err), start), nil
+	}
+
+	report, err := readOpenCodeReport(worktreePath)
+	if err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
+	testCommand = debugTestCommand(inputs.failureDoc.Content, branchInfo, report)
+	if err := validateTestCommand(testCommand); err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
+	testResult, err := a.gitManager.RunTestCommand(ctx, worktreePath, testCommand)
+	if err != nil {
+		return a.failureFeedback(ctx, task, fmt.Errorf("test command failed: %w", err), start), nil
+	}
+	hasChanges, err := a.gitManager.HasChanges(ctx, worktreePath)
+	if err != nil {
+		return a.failureFeedback(ctx, task, fmt.Errorf("check debug code changes: %w", err), start), nil
+	}
+	if !hasChanges {
+		a.logStep(fmt.Sprintf("debug success without code changes: branch=%s elapsed_ms=%d", branchInfo.Branch, common.DurationMillis(time.Since(start))))
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{inputs.branchDoc.URI}), nil
+	}
+
+	moduleName := moduleNameFromURI(inputs.moduleDoc.URI)
+	commitResult, err := a.gitManager.CommitAll(ctx, worktreePath, fmt.Sprintf("%s: debug %s", a.agentID, moduleName))
+	if err != nil {
+		return a.failureFeedback(ctx, task, fmt.Errorf("commit debug changes: %w", err), start), nil
+	}
+
+	summary := strings.TrimSpace(report.Summary)
+	if summary == "" {
+		summary = "Coder debug completed."
+	}
+	output := common.CoderBranchArtifact{
+		SchemaVersion:            1,
+		Kind:                     "coder_branch",
+		RepoDir:                  branchInfo.RepoDir,
+		BaseBranch:               branchInfo.BaseBranch,
+		BaseCommit:               branchInfo.BaseCommit,
+		Branch:                   branchInfo.Branch,
+		Commit:                   commitResult.Commit,
+		Worktree:                 filepath.ToSlash(worktreePath),
+		ModuleTaskURI:            inputs.moduleDoc.URI,
+		Summary:                  summary,
+		ChangedFiles:             report.ChangedFiles,
+		TestCommand:              testCommand,
+		CodingAgentElapsedMillis: common.DurationMillis(codingAgentResult.Duration),
+		TestElapsedMillis:        common.DurationMillis(testResult.Duration),
+		CommitElapsedMillis:      common.DurationMillis(commitResult.Duration),
+		TotalElapsedMillis:       common.DurationMillis(time.Since(start)),
+	}
+	content, err := common.MarshalJSONArtifact(output)
+	if err != nil {
+		return a.failureFeedback(ctx, task, err, start), nil
+	}
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", recipe.OutputKind, moduleName+"_debug_branch.md")
+	if err := a.artifactStore.Write(ctx, outputURI, content); err != nil {
+		return core.TaskMetaData{}, err
+	}
+	a.logStep(fmt.Sprintf("debug success: branch=%s commit=%s elapsed_ms=%d", output.Branch, output.Commit, output.TotalElapsedMillis))
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+}
+
 func findWriteCodeInputs(docs []agentengine.ArtifactDocument, recipe Recipe) (agentengine.ArtifactDocument, agentengine.ArtifactDocument, error) {
 	var moduleDoc agentengine.ArtifactDocument
 	var branchDoc agentengine.ArtifactDocument
@@ -161,6 +278,31 @@ func findWriteCodeInputs(docs []agentengine.ArtifactDocument, recipe Recipe) (ag
 		return moduleDoc, branchDoc, fmt.Errorf("%s requires an artifact URI containing /artifacts/branches/", recipe.Op)
 	}
 	return moduleDoc, branchDoc, nil
+}
+
+func findDebugInputs(docs []agentengine.ArtifactDocument, recipe Recipe) (debugInputs, error) {
+	var inputs debugInputs
+	for _, doc := range docs {
+		uri := filepath.ToSlash(strings.ToLower(doc.URI))
+		switch {
+		case strings.Contains(uri, "/artifacts/modules/"):
+			inputs.moduleDoc = doc
+		case strings.Contains(uri, "/artifacts/branches/"):
+			inputs.branchDoc = doc
+		case strings.Contains(uri, "/artifacts/test_reports/"):
+			inputs.failureDoc = doc
+		}
+	}
+	if strings.TrimSpace(inputs.moduleDoc.URI) == "" {
+		return inputs, fmt.Errorf("%s requires an artifact URI containing /artifacts/modules/", recipe.Op)
+	}
+	if strings.TrimSpace(inputs.branchDoc.URI) == "" {
+		return inputs, fmt.Errorf("%s requires an artifact URI containing /artifacts/branches/", recipe.Op)
+	}
+	if strings.TrimSpace(inputs.failureDoc.URI) == "" {
+		return inputs, fmt.Errorf("%s requires an artifact URI containing /artifacts/test_reports/", recipe.Op)
+	}
+	return inputs, nil
 }
 
 func moduleNameFromURI(uri string) string {
@@ -185,6 +327,66 @@ func readOpenCodeReport(worktree string) (openCodeExecutionReport, error) {
 		return openCodeExecutionReport{}, fmt.Errorf(".devflow/result.json status is required")
 	}
 	return report, nil
+}
+
+func debugTestCommand(failureReport string, branchInfo common.CoderBranchArtifact, report openCodeExecutionReport) string {
+	if command := testCommandFromFailureReport(failureReport); command != "" {
+		return command
+	}
+	if command := strings.TrimSpace(branchInfo.TestCommand); command != "" {
+		return command
+	}
+	if command := strings.TrimSpace(report.TestCommand); command != "" {
+		return command
+	}
+	return "go test ./..."
+}
+
+func testCommandFromFailureReport(content string) string {
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if !strings.EqualFold(strings.TrimSpace(line), "## Test Command") {
+			continue
+		}
+		for _, candidate := range lines[i+1:] {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
+			if strings.HasPrefix(candidate, "#") {
+				return ""
+			}
+			candidate = strings.Trim(candidate, "`")
+			if strings.EqualFold(candidate, "not reported") {
+				return ""
+			}
+			return candidate
+		}
+	}
+	return ""
+}
+
+func validateTestCommand(command string) error {
+	command = strings.TrimSpace(command)
+	if command == "" {
+		return fmt.Errorf("test_command is empty")
+	}
+	lower := strings.ToLower(command)
+	proseHints := []string{
+		" smoke test covering ",
+		" covering ",
+		" manual test ",
+		" validates ",
+		" verifies ",
+		" using ",
+		" and corrupt ",
+	}
+	for _, hint := range proseHints {
+		if strings.Contains(lower, hint) {
+			return fmt.Errorf("invalid test_command %q: must be executable shell command only; put explanations in summary/evidence", command)
+		}
+	}
+	return nil
 }
 
 func (a *Agent) failureFeedback(ctx context.Context, task core.TaskMetaData, cause error, start time.Time) core.TaskMetaData {

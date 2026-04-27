@@ -4,3 +4,9 @@ runtime/workspaces/run_*/
 .llm.probe.local.ps1
 internal/orchestrator/projects/
 tools/opencode/node_modules/
+runtime/flowdemo/
+**/.devflow/
+**/.pytest_cache/
+**/__pycache__/
+*.pyc
+tools/coding-agent/vendor/windows-x64/coding-agent.exe
