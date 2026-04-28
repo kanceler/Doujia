@@ -46,7 +46,11 @@ func (m *RunManager) CreateRun(ctx context.Context, runID core.RunID, pipelineID
 	if _, err := m.pipelines.Get(ctx, pipelineID); err != nil {
 		return err
 	}
-	projectDir := filepath.Join(m.projectsRoot, string(runID))
+	projectsRoot, err := filepath.Abs(filepath.Clean(m.projectsRoot))
+	if err != nil {
+		return err
+	}
+	projectDir := filepath.Join(projectsRoot, string(runID))
 	if err := os.MkdirAll(projectDir, 0o755); err != nil {
 		return err
 	}
@@ -54,7 +58,7 @@ func (m *RunManager) CreateRun(ctx context.Context, runID core.RunID, pipelineID
 		return err
 	}
 	now := time.Now().UTC()
-	err := m.runs.Create(ctx, core.PipelineRun{
+	err = m.runs.Create(ctx, core.PipelineRun{
 		ID:         runID,
 		PipelineID: pipelineID,
 		Status:     core.RunStatusCreated,
@@ -116,6 +120,9 @@ func normalizeDeliveryConfig(config core.DeliveryConfig) core.DeliveryConfig {
 	}
 	if config.Git.MainBranch == "" {
 		config.Git.MainBranch = "main"
+	}
+	if config.GlobalTestTimeoutSeconds <= 0 {
+		config.GlobalTestTimeoutSeconds = 60
 	}
 	return config
 }

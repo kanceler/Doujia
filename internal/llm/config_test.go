@@ -51,3 +51,19 @@ func TestLoadConfigFromEnvLoadsNoopProvider(t *testing.T) {
 		t.Fatalf("ProviderType = %q, want %q", cfg.ProviderType, ProviderTypeNoop)
 	}
 }
+
+func TestLoadConfigFromEnvAllowsZeroTimeoutForUnlimitedRequests(t *testing.T) {
+	t.Setenv("LLM_PROVIDER", "openai_compatible")
+	t.Setenv("LLM_BASE_URL", "https://example.com/v1")
+	t.Setenv("LLM_API_KEY", "secret")
+	t.Setenv("LLM_MODEL", "gpt-test")
+	t.Setenv("LLM_TIMEOUT_SECONDS", "0")
+
+	cfg, err := LoadConfigFromEnv()
+	if err != nil {
+		t.Fatalf("LoadConfigFromEnv() error = %v", err)
+	}
+	if cfg.RequestTimeout != 0 {
+		t.Fatalf("RequestTimeout = %v, want 0 for unlimited timeout", cfg.RequestTimeout)
+	}
+}

@@ -22,7 +22,7 @@ func GetRecipe(op string) (Recipe, error) {
 			OutputKind:         "design",
 			RequiredInputKinds: []string{"prd"},
 			SystemPrompt:       "You are an Architect Agent. Generate a technical design from the PRD input only.",
-			UserInstruction:    "Produce a concise but usable technical design, covering module boundaries, data objects, interfaces, key flows, error handling, and non-functional constraints.",
+			UserInstruction:    "Produce a concise but usable technical design, covering module boundaries, data objects, interfaces, key flows, error handling, non-functional constraints, and a Global Verification Strategy section. The Global Verification Strategy must name the likely runtime/test stack and propose executable final verification command candidates. These proposed commands are strategy only; split_module will write the official structured commands later.",
 			OutputSchema:       `{"summary":"short summary","artifact_outputs":[{"type":"design","filename":"architecture_v1.md","content":"markdown content"}],"control":[]}`,
 			MaxContextChars:    3000,
 		}, nil

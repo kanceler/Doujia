@@ -20,7 +20,7 @@ type AgentInit struct {
 	RunRoot       string
 	RunConfig     core.RunConfig
 	WorkspacePath string
-	TaskHistory   []core.TaskMetaData
+	TaskHistory   []core.AgentTaskHistory
 }
 
 type AgentDeps struct {
@@ -31,20 +31,34 @@ type AgentDeps struct {
 
 type ArtifactStoreFactory func(init AgentInit) (artifact.Store, error)
 type LLMClientFactory func(init AgentInit) (llm.Client, error)
+type TaskHistoryProvider func(ctx context.Context, runID core.RunID, agentID core.AgentID) ([]core.AgentTaskHistory, error)
 
 type AgentRuntimeConfig struct {
 	ArtifactStoreFactory ArtifactStoreFactory
 	LLMClientFactory     LLMClientFactory
+	TaskHistoryProvider  TaskHistoryProvider
 	Logger               logging.RunLogger
 }
 
-func cloneTaskHistory(items []core.TaskMetaData) []core.TaskMetaData {
+func cloneTaskHistory(items []core.AgentTaskHistory) []core.AgentTaskHistory {
 	if len(items) == 0 {
 		return nil
 	}
-	out := make([]core.TaskMetaData, len(items))
+	out := make([]core.AgentTaskHistory, len(items))
 	copy(out, items)
 	return out
+}
+
+func loadTaskHistory(ctx context.Context, init *AgentInit, config AgentRuntimeConfig) error {
+	if config.TaskHistoryProvider == nil {
+		return nil
+	}
+	history, err := config.TaskHistoryProvider(ctx, init.RunID, init.AgentID)
+	if err != nil {
+		return err
+	}
+	init.TaskHistory = cloneTaskHistory(history)
+	return nil
 }
 
 func buildAgentDeps(init AgentInit, config AgentRuntimeConfig) (AgentDeps, error) {

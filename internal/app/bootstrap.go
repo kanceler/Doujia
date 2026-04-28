@@ -13,8 +13,10 @@ import (
 	"devflow/internal/orchestrator"
 	"devflow/internal/pipeline"
 	"devflow/internal/runtime"
+	"devflow/internal/state/query"
 	"devflow/internal/state/repo"
 	"fmt"
+	"path/filepath"
 )
 
 type Modules struct {
@@ -37,10 +39,14 @@ type Bootstrap struct {
 }
 
 func NewBootstrap(projectsRoot string) *Bootstrap {
+	if absRoot, err := filepath.Abs(filepath.Clean(projectsRoot)); err == nil {
+		projectsRoot = absRoot
+	}
 	pipelineRegistry := pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseOne(), pipeline.BuiltinPhaseTwo())
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
 	runLogger := logging.NewFileRunLogger(projectsRoot)
+	taskHistoryQuery := query.NewTaskHistoryQuery(pipelineRegistry, runRepo, taskRepo)
 	agentConfig := runtime.AgentRuntimeConfig{
 		ArtifactStoreFactory: func(init runtime.AgentInit) (artifact.Store, error) {
 			return &artifact.ScopedLocalStore{
@@ -70,15 +76,13 @@ func NewBootstrap(projectsRoot string) *Bootstrap {
 				if clientCfg.Model == "" {
 					return nil, fmt.Errorf("run %q is missing llm model", init.RunID)
 				}
-				if clientCfg.RequestTimeout <= 0 {
-					clientCfg.RequestTimeout = llm.DefaultRequestTimeout
-				}
 				return llm.BuildClient(clientCfg)
 			default:
 				return nil, fmt.Errorf("run %q has unsupported llm provider type %q", init.RunID, cfg.ProviderType)
 			}
 		},
-		Logger: runLogger,
+		TaskHistoryProvider: taskHistoryQuery.ListAgentHistory,
+		Logger:              runLogger,
 	}
 	sessionRuntime := runtime.NewInMemorySessionRuntime(ceoagent.NewFactory(), runLogger, agentConfig)
 

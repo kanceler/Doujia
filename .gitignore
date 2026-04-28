@@ -1,5 +1,7 @@
 docs/
-runtime/workspaces/run_*/
+runtime/workspaces/*
+!runtime/workspaces/.gitkeep
 .llm.test.local.ps1
 .llm.probe.local.ps1
 internal/orchestrator/projects/
+tools/coding-agent/vendor/

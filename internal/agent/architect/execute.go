@@ -16,8 +16,12 @@ func (a *Agent) executeArchitectureGeneration(ctx context.Context, task core.Tas
 		a.logStep("architecture_generation fallback: artifact store is nil")
 		return a.executeArchitectureFallback(task)
 	}
+	parsedTask := task
+	if parsedTask.Op == core.TaskOpWritePlan {
+		parsedTask.Op = "architecture_generation"
+	}
 
-	env, err := agentengine.ParseTask(task)
+	env, err := agentengine.ParseTask(parsedTask)
 	if err != nil {
 		return core.TaskMetaData{}, err
 	}
@@ -82,63 +86,7 @@ func (a *Agent) executeArchitectureFallback(task core.TaskMetaData) (core.TaskMe
 	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
 }
 
-func (a *Agent) executeSplitModule(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
-	a.logStep("split_module fallback output used")
-	moduleURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "module", "module01.md")
-	planURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "module", "module_plan_v1.json")
-	moduleContent := "# Module 01\n\nBuild the first stub module.\n"
-	planContent := `{"modules":[{"id":"module01","coder":"coder01","tester":"tester01"}]}`
-	if a.artifactStore != nil {
-		if err := a.artifactStore.Write(ctx, moduleURI, []byte(moduleContent)); err != nil {
-			return core.TaskMetaData{}, err
-		}
-		if err := a.artifactStore.Write(ctx, planURI, []byte(planContent)); err != nil {
-			return core.TaskMetaData{}, err
-		}
-		return core.TaskMetaData{
-			Direction:    core.TaskDirectionFeedback,
-			RunID:        a.runID,
-			TaskID:       task.TaskID,
-			ParentID:     task.ParentID,
-			DependsOn:    task.DependsOn,
-			DependsOnIDs: task.DependsOnIDs,
-			AgentID:      a.agentID,
-			Op:           task.Op,
-			ArtifactURIs: []string{planURI},
-			Result:       core.TaskResultCodeOK,
-			Control: []core.Control{
-				{Type: core.ControlTypeNewCoder, AgentName: "coder01", ArtifactURIs: []string{moduleURI}},
-				{Type: core.ControlTypeNewTester, AgentName: "tester01", ArtifactURIs: []string{moduleURI}},
-			},
-		}, nil
-	}
-	moduleOutput, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "module", "module01.md"), moduleContent)
-	if err != nil {
-		return core.TaskMetaData{}, err
-	}
-	planOutput, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "module", "module_plan_v1.json"), planContent)
-	if err != nil {
-		return core.TaskMetaData{}, err
-	}
-	return core.TaskMetaData{
-		Direction:    core.TaskDirectionFeedback,
-		RunID:        a.runID,
-		TaskID:       task.TaskID,
-		ParentID:     task.ParentID,
-		DependsOn:    task.DependsOn,
-		DependsOnIDs: task.DependsOnIDs,
-		AgentID:      a.agentID,
-		Op:           task.Op,
-		ArtifactURIs: []string{planOutput},
-		Result:       core.TaskResultCodeOK,
-		Control: []core.Control{
-			{Type: core.ControlTypeNewCoder, AgentName: "coder01", ArtifactURIs: []string{moduleOutput}},
-			{Type: core.ControlTypeNewTester, AgentName: "tester01", ArtifactURIs: []string{moduleOutput}},
-		},
-	}, nil
-}
-
-func (a *Agent) executeMergeCode(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+func (a *Agent) executeMergeCodeFallback(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	a.logStep("merge_code fallback output used")
 	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "code", "merged_code_v1.md")
 	content := "# Merged Code Stub\n\nArchitect merge output is ready.\n"
@@ -155,7 +103,7 @@ func (a *Agent) executeMergeCode(ctx context.Context, task core.TaskMetaData) (c
 	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
 }
 
-func (a *Agent) executeGlobalTestCode(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+func (a *Agent) executeGlobalTestCodeFallback(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
 	a.logStep("global test_code fallback output used")
 	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "test", "global_test_report_v1.md")
 	content := "# Global Test Report Stub\n\nArchitect global test passed.\n"

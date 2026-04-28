@@ -43,14 +43,12 @@ const (
 type TaskResultCode string
 
 const (
-	TaskResultCodeOK              TaskResultCode = "kok"
-	TaskResultCodeFail            TaskResultCode = "kfail"
-	TaskResultCodeUpstreamMissing TaskResultCode = "k_upstream_missing"
-	TaskResultCodeReviewReject    TaskResultCode = "k_review_reject"
-	TaskResultCodeRewrite         TaskResultCode = "krewrite"
-	TaskResultCodeReplan          TaskResultCode = "kreplan"
-	TaskResultCodeBug             TaskResultCode = "kbug"
-	TaskResultCodeControlInvalid  TaskResultCode = "kcontrol_invalid"
+	TaskResultCodeOK             TaskResultCode = "kok"
+	TaskResultCodeFail           TaskResultCode = "kfail"
+	TaskResultCodeRewrite        TaskResultCode = "krewrite"
+	TaskResultCodeReplan         TaskResultCode = "kreplan"
+	TaskResultCodeBug            TaskResultCode = "kbug"
+	TaskResultCodeControlInvalid TaskResultCode = "kcontrol_invalid"
 )
 
 const (
@@ -103,6 +101,16 @@ type TaskMetaData struct {
 	Control      []Control      `json:"control,omitempty"`
 }
 
+type AgentTaskHistory struct {
+	RunID              RunID      `json:"run_id"`
+	TaskID             TaskID     `json:"task_id"`
+	AgentID            AgentID    `json:"agent_id"`
+	Op                 string     `json:"op"`
+	Status             TaskStatus `json:"status"`
+	InputArtifactURIs  []string   `json:"input_artifact_uris,omitempty"`
+	OutputArtifactURIs []string   `json:"output_artifact_uris,omitempty"`
+}
+
 type RunConfig struct {
 	LLM      LLMConfig      `json:"llm"`
 	Delivery DeliveryConfig `json:"delivery,omitempty"`
@@ -117,11 +125,13 @@ type LLMConfig struct {
 }
 
 type DeliveryConfig struct {
-	MaxCoderAgents         int          `json:"max_coder_agents"`
-	MaxTesterAgents        int          `json:"max_tester_agents"`
-	RequireTesterPerModule bool         `json:"require_tester_per_module"`
-	AllowParallelWork      bool         `json:"allow_parallel_work"`
-	Git                    GitRunConfig `json:"git"`
+	MaxCoderAgents           int          `json:"max_coder_agents"`
+	MaxTesterAgents          int          `json:"max_tester_agents"`
+	RequireTesterPerModule   bool         `json:"require_tester_per_module"`
+	AllowParallelWork        bool         `json:"allow_parallel_work"`
+	GlobalVerifyCommands     []string     `json:"global_verify_commands,omitempty"`
+	GlobalTestTimeoutSeconds int          `json:"global_test_timeout_seconds,omitempty"`
+	Git                      GitRunConfig `json:"git"`
 }
 
 type GitRunConfig struct {

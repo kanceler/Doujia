@@ -5,19 +5,28 @@ import (
 	"devflow/internal/agent/common"
 	"devflow/internal/artifact"
 	"devflow/internal/core"
+	"devflow/internal/llm"
 	"devflow/internal/logging"
 	"devflow/internal/runtime"
 	"fmt"
 	"path"
 	"path/filepath"
+	"sync"
 )
 
 type Agent struct {
-	agentID       core.AgentID
-	runID         core.RunID
-	workspacePath string
-	artifactStore artifact.Store
-	logger        logging.RunLogger
+	agentID        core.AgentID
+	runID          core.RunID
+	runRoot        string
+	workspacePath  string
+	runConfig      core.RunConfig
+	historyMu      sync.Mutex
+	taskHistory    []core.AgentTaskHistory
+	artifactStore  artifact.Store
+	llmClient      llm.Client
+	logger         logging.RunLogger
+	openCodeRunner common.OpenCodeRunner
+	gitManager     common.GitManager
 }
 
 func NewFactory() runtime.Agent {
@@ -26,21 +35,44 @@ func NewFactory() runtime.Agent {
 
 func (a *Agent) Create(init runtime.AgentInit, deps runtime.AgentDeps) runtime.Agent {
 	return &Agent{
-		agentID:       init.AgentID,
-		runID:         init.RunID,
-		workspacePath: init.WorkspacePath,
-		artifactStore: deps.ArtifactStore,
-		logger:        deps.Logger,
+		agentID:        init.AgentID,
+		runID:          init.RunID,
+		runRoot:        init.RunRoot,
+		workspacePath:  init.WorkspacePath,
+		runConfig:      init.RunConfig,
+		taskHistory:    common.CloneTaskHistory(init.TaskHistory),
+		artifactStore:  deps.ArtifactStore,
+		llmClient:      deps.LLMClient,
+		logger:         deps.Logger,
+		openCodeRunner: common.NewManagedOpenCodeRunner(init.RunRoot),
+		gitManager:     common.NewLocalGitManager(),
 	}
 }
 
-func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
-	switch task.Op {
-	case core.TaskOpWriteCode, core.TaskOpDebug:
-		return a.writeCodeArtifact(ctx, task)
+func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (feedback core.TaskMetaData, err error) {
+	defer func() {
+		a.recordTaskHistory(task, feedback, err)
+	}()
+
+	recipe, recipeErr := GetRecipe(task.Op)
+	if recipeErr != nil {
+		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
+	}
+	switch recipe.Op {
+	case core.TaskOpWriteCode:
+		return a.executeWriteCode(ctx, task, recipe)
+	case core.TaskOpDebug:
+		return a.executeDebug(ctx, task, recipe)
 	default:
 		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
 	}
+}
+
+func (a *Agent) recordTaskHistory(task core.TaskMetaData, feedback core.TaskMetaData, err error) {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+
+	a.taskHistory = append(a.taskHistory, common.NewTaskHistoryItem(task, feedback, a.agentID, err))
 }
 
 func (a *Agent) writeCodeArtifact(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
