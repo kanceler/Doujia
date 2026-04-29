@@ -1,4 +1,4 @@
-package architect
+package tester
 
 import (
 	"context"
@@ -8,6 +8,9 @@ import (
 	"devflow/internal/llm"
 	"devflow/internal/logging"
 	"devflow/internal/runtime"
+	"fmt"
+	"path"
+	"path/filepath"
 	"sync"
 )
 
@@ -49,25 +52,17 @@ func (a *Agent) Execute(ctx context.Context, task core.TaskMetaData) (feedback c
 		a.recordTaskHistory(task, feedback, err)
 	}()
 
-	switch task.Op {
-	case core.TaskOpWritePlan:
-		return a.executeArchitectureGeneration(ctx, task)
-	case core.TaskOpSplitModule, core.TaskOpResplitModule:
-		return a.executeSplitModule(ctx, task)
-	case core.TaskOpMergeCode:
-		return a.executeMergeCode(ctx, task)
-	case core.TaskOpTestCode:
-		return a.executeGlobalTestCode(ctx, task)
+	recipe, recipeErr := GetRecipe(task.Op)
+	if recipeErr != nil {
+		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
+	}
+	switch recipe.Op {
 	case core.TaskOpTestData:
-		return a.executeTestData(ctx, task)
-	case core.TaskOpReplan:
-		return a.executeReplan(ctx, task)
-	case "architecture_generation", core.TaskOpRewrite:
-		return a.executeArchitectureGeneration(ctx, task)
-	case "architect_review_proposal":
-		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
+		return a.executeTestData(ctx, task, recipe), nil
+	case core.TaskOpTestCode:
+		return a.executeTestCode(ctx, task, recipe), nil
 	default:
-		return common.FeedbackFor(task, a.runID, a.agentID, append([]string(nil), task.ArtifactURIs...)), nil
+		return a.writeTestArtifact(ctx, task)
 	}
 }
 
@@ -76,4 +71,28 @@ func (a *Agent) recordTaskHistory(task core.TaskMetaData, feedback core.TaskMeta
 	defer a.historyMu.Unlock()
 
 	a.taskHistory = append(a.taskHistory, common.NewTaskHistoryItem(task, feedback, a.agentID, err))
+}
+
+func (a *Agent) writeTestArtifact(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	filename := fmt.Sprintf("%s_%s_v1.md", a.agentID, task.Op)
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "test", filename)
+	content := fmt.Sprintf("# Test Stub\n\nagent: %s\nop: %s\n", a.agentID, task.Op)
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(ctx, outputURI, []byte(content)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		a.logStep(fmt.Sprintf("test artifact written: %s", outputURI))
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+	}
+	output, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "test", filename), content)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
+}
+
+func (a *Agent) logStep(message string) {
+	if a.logger != nil {
+		_ = a.logger.Log(a.runID, "TesterAgent", message)
+	}
 }

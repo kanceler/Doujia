@@ -47,16 +47,17 @@ type queuedTask struct {
 }
 
 type TaskRuntime struct {
-	mu           sync.RWMutex
-	factories    map[core.AgentRole]Agent
-	instances    map[core.RuntimeID]agentInstance
-	agentIndex   map[agentRuntimeKey]core.RuntimeID
-	queue        chan queuedTask
-	sink         FeedbackSink
-	binder       Binder
-	nextID       int
-	logger       logging.RunLogger
-	config       AgentRuntimeConfig
+	mu         sync.RWMutex
+	factories  map[core.AgentRole]Agent
+	instances  map[core.RuntimeID]agentInstance
+	agentIndex map[agentRuntimeKey]core.RuntimeID
+	queue      chan queuedTask
+	sink       FeedbackSink
+	binder     Binder
+	nextID     int
+	logger     logging.RunLogger
+	config     AgentRuntimeConfig
+	execCtx    context.Context
 }
 
 func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger, config AgentRuntimeConfig) *TaskRuntime {
@@ -68,6 +69,7 @@ func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger
 		sink:       sink,
 		logger:     logger,
 		config:     config,
+		execCtx:    context.Background(),
 	}
 	for i := 0; i < workerCount; i++ {
 		go tr.worker()
@@ -81,6 +83,16 @@ func (r *TaskRuntime) SetBinder(binder Binder) {
 
 func (r *TaskRuntime) SetFeedbackSink(sink FeedbackSink) {
 	r.sink = sink
+}
+
+func (r *TaskRuntime) SetExecutionContext(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ctx == nil {
+		r.execCtx = context.Background()
+		return
+	}
+	r.execCtx = ctx
 }
 
 func (r *TaskRuntime) RegisterTemplate(role core.AgentRole, factory Agent) {
@@ -125,6 +137,10 @@ func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (
 		RunConfig:     req.RunConfig,
 		WorkspacePath: workspacePath,
 	}
+	if err := loadTaskHistory(ctx, &init, r.config); err != nil {
+		r.mu.Unlock()
+		return EnsureAgentResult{}, err
+	}
 	deps, err := buildAgentDeps(init, r.config)
 	if err != nil {
 		r.mu.Unlock()
@@ -166,17 +182,18 @@ func (r *TaskRuntime) worker() {
 		if r.logger != nil {
 			_ = r.logger.LogTaskMeta(item.task.RunID, "TaskRuntime", fmt.Sprintf("worker start runtime_id=%s agent_id=%s", item.runtimeID, instance.agentID), item.task)
 		}
-		feedback, err := instance.agent.Execute(context.Background(), item.task)
+		feedback, err := instance.agent.Execute(r.executionContext(), item.task)
 		if err != nil {
 			feedback = core.TaskMetaData{
-				Direction: core.TaskDirectionFeedback,
-				RunID:     item.task.RunID,
-				TaskID:    item.task.TaskID,
-				ParentID:  item.task.ParentID,
-				DependsOn: item.task.DependsOn,
-				AgentID:   instance.agentID,
-				Op:        item.task.Op,
-				Result:    core.TaskResultCodeFail,
+				Direction:    core.TaskDirectionFeedback,
+				RunID:        item.task.RunID,
+				TaskID:       item.task.TaskID,
+				ParentID:     item.task.ParentID,
+				DependsOn:    item.task.DependsOn,
+				DependsOnIDs: item.task.DependsOnIDs,
+				AgentID:      instance.agentID,
+				Op:           item.task.Op,
+				Result:       core.TaskResultCodeFail,
 			}
 		}
 		if r.logger != nil {
@@ -186,4 +203,13 @@ func (r *TaskRuntime) worker() {
 			_ = r.sink.OnFeedback(context.Background(), feedback)
 		}
 	}
+}
+
+func (r *TaskRuntime) executionContext() context.Context {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.execCtx == nil {
+		return context.Background()
+	}
+	return r.execCtx
 }

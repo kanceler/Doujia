@@ -6,11 +6,11 @@ import (
 	"path/filepath"
 )
 
-func CloneTaskHistory(items []core.TaskMetaData) []core.TaskMetaData {
+func CloneTaskHistory(items []core.AgentTaskHistory) []core.AgentTaskHistory {
 	if len(items) == 0 {
 		return nil
 	}
-	out := make([]core.TaskMetaData, len(items))
+	out := make([]core.AgentTaskHistory, len(items))
 	copy(out, items)
 	return out
 }
@@ -33,6 +33,7 @@ func FeedbackFor(task core.TaskMetaData, runID core.RunID, agentID core.AgentID,
 		TaskID:       task.TaskID,
 		ParentID:     task.ParentID,
 		DependsOn:    task.DependsOn,
+		DependsOnIDs: task.DependsOnIDs,
 		AgentID:      agentID,
 		Op:           task.Op,
 		ArtifactURIs: outputs,

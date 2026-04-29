@@ -9,6 +9,7 @@ func BuildFeedback(task core.TaskMetaData, outputURIs []string, output ModelOutp
 		TaskID:       task.TaskID,
 		ParentID:     task.ParentID,
 		DependsOn:    task.DependsOn,
+		DependsOnIDs: task.DependsOnIDs,
 		AgentID:      task.AgentID,
 		Op:           task.Op,
 		ArtifactURIs: outputURIs,

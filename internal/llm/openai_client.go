@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,11 @@ import (
 )
 
 const defaultTemperature = 0.2
+const chatCompletionMaxAttempts = 3
+
+var chatCompletionRetryDelay = func(attempt int) time.Duration {
+	return time.Duration(attempt) * time.Second
+}
 
 type OpenAICompatibleClient struct {
 	config     Config
@@ -20,23 +26,22 @@ type OpenAICompatibleClient struct {
 }
 
 func NewOpenAICompatibleClient(config Config) *OpenAICompatibleClient {
-	timeout := config.RequestTimeout
-	if timeout <= 0 {
-		timeout = DefaultRequestTimeout
+	httpClient := &http.Client{
+		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   20 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout: 20 * time.Second,
+		},
+	}
+	if config.RequestTimeout > 0 {
+		httpClient.Timeout = config.RequestTimeout
 	}
 	return &OpenAICompatibleClient{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: timeout,
-			Transport: &http.Transport{
-				Proxy: http.ProxyFromEnvironment,
-				DialContext: (&net.Dialer{
-					Timeout:   5 * time.Second,
-					KeepAlive: 30 * time.Second,
-				}).DialContext,
-				TLSHandshakeTimeout: 5 * time.Second,
-			},
-		},
+		config:     config,
+		httpClient: httpClient,
 	}
 }
 
@@ -67,6 +72,28 @@ func (c *OpenAICompatibleClient) Complete(ctx context.Context, prompt string) (s
 	}
 
 	endpoint := strings.TrimRight(c.config.BaseURL, "/") + "/chat/completions"
+	var lastErr error
+	for attempt := 1; attempt <= chatCompletionMaxAttempts; attempt++ {
+		content, err := c.completeOnce(ctx, endpoint, payload)
+		if err == nil {
+			return content, nil
+		}
+		lastErr = err
+		retryable := isRetryableChatCompletionError(err)
+		if attempt == chatCompletionMaxAttempts || !retryable {
+			if retryable && attempt > 1 {
+				return "", fmt.Errorf("chat completions failed after %d attempts: %w", attempt, err)
+			}
+			return "", err
+		}
+		if err := sleepContext(ctx, chatCompletionRetryDelay(attempt)); err != nil {
+			return "", fmt.Errorf("chat completions retry canceled after attempt %d: %w", attempt, lastErr)
+		}
+	}
+	return "", lastErr
+}
+
+func (c *OpenAICompatibleClient) completeOnce(ctx context.Context, endpoint string, payload []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
 		return "", fmt.Errorf("create chat completion request: %w", err)
@@ -76,13 +103,21 @@ func (c *OpenAICompatibleClient) Complete(ctx context.Context, prompt string) (s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("chat completions request: %w", err)
+		return "", &chatCompletionError{
+			message:   fmt.Sprintf("chat completions request: %v", err),
+			cause:     err,
+			retryable: isRetryableNetworkError(err),
+		}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2000))
-		return "", fmt.Errorf("chat completions status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		bodyText := strings.TrimSpace(string(body))
+		return "", &chatCompletionError{
+			message:   fmt.Sprintf("chat completions status %d: %s", resp.StatusCode, bodyText),
+			retryable: isRetryableStatus(resp.StatusCode, bodyText),
+		}
 	}
 
 	var parsed chatCompletionResponse
@@ -97,6 +132,65 @@ func (c *OpenAICompatibleClient) Complete(ctx context.Context, prompt string) (s
 		return "", fmt.Errorf("chat completion response content is empty")
 	}
 	return content, nil
+}
+
+type chatCompletionError struct {
+	message   string
+	cause     error
+	retryable bool
+}
+
+func (e *chatCompletionError) Error() string {
+	return e.message
+}
+
+func (e *chatCompletionError) Unwrap() error {
+	return e.cause
+}
+
+func isRetryableChatCompletionError(err error) bool {
+	var chatErr *chatCompletionError
+	return errors.As(err, &chatErr) && chatErr.retryable
+}
+
+func isRetryableNetworkError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "temporary failure") ||
+		strings.Contains(lower, "unexpected eof")
+}
+
+func isRetryableStatus(statusCode int, body string) bool {
+	lower := strings.ToLower(body)
+	if strings.Contains(lower, "quota_exhausted") || strings.Contains(lower, "insufficient_quota") {
+		return false
+	}
+	return statusCode == http.StatusRequestTimeout ||
+		statusCode == http.StatusTooManyRequests ||
+		statusCode >= 500
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 type chatCompletionRequest struct {

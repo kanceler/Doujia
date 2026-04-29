@@ -17,4 +17,3 @@ type PipelineSpec struct {
 	Name   string
 	Stages []StageSpec
 }
-

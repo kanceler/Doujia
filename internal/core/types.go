@@ -43,8 +43,26 @@ const (
 type TaskResultCode string
 
 const (
-	TaskResultCodeOK   TaskResultCode = "kok"
-	TaskResultCodeFail TaskResultCode = "kfail"
+	TaskResultCodeOK             TaskResultCode = "kok"
+	TaskResultCodeFail           TaskResultCode = "kfail"
+	TaskResultCodeRewrite        TaskResultCode = "krewrite"
+	TaskResultCodeReplan         TaskResultCode = "kreplan"
+	TaskResultCodeBug            TaskResultCode = "kbug"
+	TaskResultCodeControlInvalid TaskResultCode = "kcontrol_invalid"
+)
+
+const (
+	TaskOpWritePlan     = "write_plan"
+	TaskOpReviewPlan    = "review_plan"
+	TaskOpRewrite       = "rewrite"
+	TaskOpReplan        = "replan"
+	TaskOpSplitModule   = "split_module"
+	TaskOpResplitModule = "resplit_module"
+	TaskOpWriteCode     = "write_code"
+	TaskOpTestData      = "test_data"
+	TaskOpTestCode      = "test_code"
+	TaskOpDebug         = "debug"
+	TaskOpMergeCode     = "merge_code"
 )
 
 type ControlType string
@@ -75,6 +93,7 @@ type TaskMetaData struct {
 	TaskID       TaskID         `json:"task_id"`
 	ParentID     *TaskID        `json:"parent_id,omitempty"`
 	DependsOn    *TaskID        `json:"depends_on,omitempty"`
+	DependsOnIDs []TaskID       `json:"depends_on_ids,omitempty"`
 	AgentID      AgentID        `json:"agent_id"`
 	Op           string         `json:"op"`
 	ArtifactURIs []string       `json:"artifact_uris"`
@@ -82,27 +101,54 @@ type TaskMetaData struct {
 	Control      []Control      `json:"control,omitempty"`
 }
 
+type AgentTaskHistory struct {
+	RunID              RunID      `json:"run_id"`
+	TaskID             TaskID     `json:"task_id"`
+	AgentID            AgentID    `json:"agent_id"`
+	Op                 string     `json:"op"`
+	Status             TaskStatus `json:"status"`
+	InputArtifactURIs  []string   `json:"input_artifact_uris,omitempty"`
+	OutputArtifactURIs []string   `json:"output_artifact_uris,omitempty"`
+}
+
 type RunConfig struct {
-	LLM LLMConfig
+	LLM      LLMConfig      `json:"llm"`
+	Delivery DeliveryConfig `json:"delivery,omitempty"`
 }
 
 type LLMConfig struct {
-	ProviderType   string
-	BaseURL        string
-	APIKey         string
-	Model          string
-	RequestTimeout time.Duration
+	ProviderType   string        `json:"provider_type"`
+	BaseURL        string        `json:"base_url,omitempty"`
+	APIKey         string        `json:"api_key,omitempty"`
+	Model          string        `json:"model,omitempty"`
+	RequestTimeout time.Duration `json:"request_timeout,omitempty"`
+}
+
+type DeliveryConfig struct {
+	MaxCoderAgents           int          `json:"max_coder_agents"`
+	MaxTesterAgents          int          `json:"max_tester_agents"`
+	RequireTesterPerModule   bool         `json:"require_tester_per_module"`
+	AllowParallelWork        bool         `json:"allow_parallel_work"`
+	GlobalVerifyCommands     []string     `json:"global_verify_commands,omitempty"`
+	GlobalTestTimeoutSeconds int          `json:"global_test_timeout_seconds,omitempty"`
+	Git                      GitRunConfig `json:"git"`
+}
+
+type GitRunConfig struct {
+	RepoURL    string `json:"repo_url,omitempty"`
+	MainBranch string `json:"main_branch,omitempty"`
+	BaseRef    string `json:"base_ref,omitempty"`
 }
 
 type PipelineRun struct {
-	ID          RunID
-	PipelineID  PipelineID
-	Status      RunStatus
-	ProjectDir  string
-	SessionID   SessionID
-	Config      RunConfig
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	ID         RunID
+	PipelineID PipelineID
+	Status     RunStatus
+	ProjectDir string
+	SessionID  SessionID
+	Config     RunConfig
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
 }
 
 type Task struct {
@@ -114,9 +160,9 @@ type Task struct {
 	Status             TaskStatus
 	ParentID           *TaskID
 	DependsOn          *TaskID
+	DependsOnIDs       []TaskID
 	InputArtifactRefs  []ArtifactRef
 	OutputArtifactRefs []ArtifactRef
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
-

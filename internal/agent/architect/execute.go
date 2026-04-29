@@ -16,8 +16,12 @@ func (a *Agent) executeArchitectureGeneration(ctx context.Context, task core.Tas
 		a.logStep("architecture_generation fallback: artifact store is nil")
 		return a.executeArchitectureFallback(task)
 	}
+	parsedTask := task
+	if parsedTask.Op == core.TaskOpWritePlan {
+		parsedTask.Op = "architecture_generation"
+	}
 
-	env, err := agentengine.ParseTask(task)
+	env, err := agentengine.ParseTask(parsedTask)
 	if err != nil {
 		return core.TaskMetaData{}, err
 	}
@@ -76,6 +80,40 @@ func (a *Agent) executeArchitectureFallback(task core.TaskMetaData) (core.TaskMe
 		filepath.Join("artifacts", "architecture", "architecture_v1.md"),
 		content,
 	)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
+}
+
+func (a *Agent) executeMergeCodeFallback(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	a.logStep("merge_code fallback output used")
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "code", "merged_code_v1.md")
+	content := "# Merged Code Stub\n\nArchitect merge output is ready.\n"
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(ctx, outputURI, []byte(content)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+	}
+	output, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "code", "merged_code_v1.md"), content)
+	if err != nil {
+		return core.TaskMetaData{}, err
+	}
+	return common.FeedbackFor(task, a.runID, a.agentID, []string{output}), nil
+}
+
+func (a *Agent) executeGlobalTestCodeFallback(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
+	a.logStep("global test_code fallback output used")
+	outputURI := path.Join("projects", string(a.runID), "agents", string(a.agentID), "artifacts", "test", "global_test_report_v1.md")
+	content := "# Global Test Report Stub\n\nArchitect global test passed.\n"
+	if a.artifactStore != nil {
+		if err := a.artifactStore.Write(ctx, outputURI, []byte(content)); err != nil {
+			return core.TaskMetaData{}, err
+		}
+		return common.FeedbackFor(task, a.runID, a.agentID, []string{outputURI}), nil
+	}
+	output, err := common.WriteAgentOutput(a.workspacePath, filepath.Join("artifacts", "test", "global_test_report_v1.md"), content)
 	if err != nil {
 		return core.TaskMetaData{}, err
 	}

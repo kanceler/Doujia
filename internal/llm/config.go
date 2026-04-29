@@ -19,10 +19,10 @@ const (
 )
 
 type Config struct {
-	ProviderType ProviderType
-	BaseURL      string
-	APIKey       string
-	Model        string
+	ProviderType   ProviderType
+	BaseURL        string
+	APIKey         string
+	Model          string
 	RequestTimeout time.Duration
 }
 
@@ -32,10 +32,10 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, err
 	}
 	cfg := Config{
-		ProviderType: ProviderType(strings.TrimSpace(os.Getenv("LLM_PROVIDER"))),
-		BaseURL:      strings.TrimRight(strings.TrimSpace(os.Getenv("LLM_BASE_URL")), "/"),
-		APIKey:       strings.TrimSpace(os.Getenv("LLM_API_KEY")),
-		Model:        strings.TrimSpace(os.Getenv("LLM_MODEL")),
+		ProviderType:   ProviderType(strings.TrimSpace(os.Getenv("LLM_PROVIDER"))),
+		BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("LLM_BASE_URL")), "/"),
+		APIKey:         strings.TrimSpace(os.Getenv("LLM_API_KEY")),
+		Model:          strings.TrimSpace(os.Getenv("LLM_MODEL")),
 		RequestTimeout: timeout,
 	}
 	if cfg.ProviderType == "" {
@@ -84,8 +84,11 @@ func loadRequestTimeoutFromEnv() (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid LLM_TIMEOUT_SECONDS %q", raw)
 	}
-	if seconds <= 0 {
-		return 0, fmt.Errorf("LLM_TIMEOUT_SECONDS must be greater than zero")
+	if seconds < 0 {
+		return 0, fmt.Errorf("LLM_TIMEOUT_SECONDS must be zero or greater")
+	}
+	if seconds == 0 {
+		return 0, nil
 	}
 	return time.Duration(seconds) * time.Second, nil
 }

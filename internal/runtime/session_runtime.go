@@ -31,6 +31,7 @@ type InMemorySessionRuntime struct {
 	logger     logging.RunLogger
 	config     AgentRuntimeConfig
 	sink       FeedbackSink
+	execCtx    context.Context
 }
 
 func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger, config AgentRuntimeConfig) *InMemorySessionRuntime {
@@ -39,6 +40,7 @@ func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger, confi
 		ceoFactory: ceoFactory,
 		logger:     logger,
 		config:     config,
+		execCtx:    context.Background(),
 	}
 }
 
@@ -46,7 +48,17 @@ func (r *InMemorySessionRuntime) SetFeedbackSink(sink FeedbackSink) {
 	r.sink = sink
 }
 
-func (r *InMemorySessionRuntime) CreateSession(_ context.Context, run core.PipelineRun) (Session, error) {
+func (r *InMemorySessionRuntime) SetExecutionContext(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ctx == nil {
+		r.execCtx = context.Background()
+		return
+	}
+	r.execCtx = ctx
+}
+
+func (r *InMemorySessionRuntime) CreateSession(ctx context.Context, run core.PipelineRun) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	runID := run.ID
@@ -71,6 +83,9 @@ func (r *InMemorySessionRuntime) CreateSession(_ context.Context, run core.Pipel
 		RunRoot:       projectRoot,
 		RunConfig:     run.Config,
 		WorkspacePath: workspacePath,
+	}
+	if err := loadTaskHistory(ctx, &init, r.config); err != nil {
+		return Session{}, err
 	}
 	deps, err := buildAgentDeps(init, r.config)
 	if err != nil {
@@ -102,21 +117,34 @@ func (r *InMemorySessionRuntime) DispatchToSession(ctx context.Context, task cor
 	if r.logger != nil {
 		_ = r.logger.LogTaskMeta(task.RunID, "SessionRuntime", "dispatch_to_session", task)
 	}
-	feedback, err := session.Agent.Execute(ctx, task)
+	feedback, err := session.Agent.Execute(r.executionContext(ctx), task)
 	if err != nil {
 		feedback = core.TaskMetaData{
-			Direction: core.TaskDirectionFeedback,
-			RunID:     task.RunID,
-			TaskID:    task.TaskID,
-			ParentID:  task.ParentID,
-			DependsOn: task.DependsOn,
-			AgentID:   session.CEOAgent,
-			Op:        task.Op,
-			Result:    core.TaskResultCodeFail,
+			Direction:    core.TaskDirectionFeedback,
+			RunID:        task.RunID,
+			TaskID:       task.TaskID,
+			ParentID:     task.ParentID,
+			DependsOn:    task.DependsOn,
+			DependsOnIDs: task.DependsOnIDs,
+			AgentID:      session.CEOAgent,
+			Op:           task.Op,
+			Result:       core.TaskResultCodeFail,
 		}
 	}
 	if r.sink != nil {
 		return r.sink.OnFeedback(ctx, feedback)
 	}
 	return nil
+}
+
+func (r *InMemorySessionRuntime) executionContext(fallback context.Context) context.Context {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.execCtx != nil {
+		return r.execCtx
+	}
+	if fallback != nil {
+		return fallback
+	}
+	return context.Background()
 }

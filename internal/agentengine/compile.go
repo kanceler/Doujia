@@ -100,9 +100,9 @@ func BuildPrompt(task TaskEnvelope, recipe Recipe, chunks []ContextChunk) string
 }
 
 func ParseModelOutput(raw string) (ModelOutput, error) {
-	var output ModelOutput
-	if err := json.Unmarshal([]byte(raw), &output); err != nil {
-		return ModelOutput{}, fmt.Errorf("parse model output json: %w", err)
+	output, err := parseModelOutputJSON(raw)
+	if err != nil {
+		return ModelOutput{}, err
 	}
 	if strings.TrimSpace(output.Summary) == "" {
 		return ModelOutput{}, fmt.Errorf("model output summary is required")
@@ -119,4 +119,66 @@ func ParseModelOutput(raw string) (ModelOutput, error) {
 		}
 	}
 	return output, nil
+}
+
+func parseModelOutputJSON(raw string) (ModelOutput, error) {
+	var output ModelOutput
+	trimmed := strings.TrimSpace(raw)
+	if err := json.Unmarshal([]byte(trimmed), &output); err == nil {
+		return output, nil
+	}
+	if extracted, ok := extractJSONObject(trimmed); ok {
+		if err := json.Unmarshal([]byte(extracted), &output); err == nil {
+			return output, nil
+		}
+	}
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] != '{' {
+			continue
+		}
+		decoder := json.NewDecoder(strings.NewReader(trimmed[i:]))
+		if err := decoder.Decode(&output); err == nil {
+			return output, nil
+		}
+	}
+	return ModelOutput{}, fmt.Errorf("parse model output json: invalid JSON object")
+}
+
+func extractJSONObject(raw string) (string, bool) {
+	start := strings.IndexByte(raw, '{')
+	if start < 0 {
+		return "", false
+	}
+	inString := false
+	escaped := false
+	depth := 0
+	for i := start; i < len(raw); i++ {
+		ch := raw[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return raw[start : i+1], true
+			}
+		}
+	}
+	return "", false
 }
