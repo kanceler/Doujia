@@ -51,6 +51,7 @@ type TaskRuntime struct {
 	factories  map[core.AgentRole]Agent
 	instances  map[core.RuntimeID]agentInstance
 	agentIndex map[agentRuntimeKey]core.RuntimeID
+	workerCount int
 	queue      chan queuedTask
 	sink       FeedbackSink
 	binder     Binder
@@ -61,10 +62,14 @@ type TaskRuntime struct {
 }
 
 func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger, config AgentRuntimeConfig) *TaskRuntime {
+	if workerCount <= 0 {
+		workerCount = 1
+	}
 	tr := &TaskRuntime{
 		factories:  make(map[core.AgentRole]Agent),
 		instances:  make(map[core.RuntimeID]agentInstance),
 		agentIndex: make(map[agentRuntimeKey]core.RuntimeID),
+		workerCount: workerCount,
 		queue:      make(chan queuedTask, 128),
 		sink:       sink,
 		logger:     logger,
@@ -75,6 +80,12 @@ func NewTaskRuntime(workerCount int, sink FeedbackSink, logger logging.RunLogger
 		go tr.worker()
 	}
 	return tr
+}
+
+func (r *TaskRuntime) WorkerCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.workerCount
 }
 
 func (r *TaskRuntime) SetBinder(binder Binder) {
@@ -137,10 +148,6 @@ func (r *TaskRuntime) EnsureAgent(ctx context.Context, req EnsureAgentRequest) (
 		RunConfig:     req.RunConfig,
 		WorkspacePath: workspacePath,
 	}
-	if err := loadTaskHistory(ctx, &init, r.config); err != nil {
-		r.mu.Unlock()
-		return EnsureAgentResult{}, err
-	}
 	deps, err := buildAgentDeps(init, r.config)
 	if err != nil {
 		r.mu.Unlock()
@@ -189,10 +196,11 @@ func (r *TaskRuntime) worker() {
 				RunID:        item.task.RunID,
 				TaskID:       item.task.TaskID,
 				ParentID:     item.task.ParentID,
-				DependsOn:    item.task.DependsOn,
 				DependsOnIDs: item.task.DependsOnIDs,
 				AgentID:      instance.agentID,
 				Op:           item.task.Op,
+				InputBagIDs:  item.task.InputBagIDs,
+				InputBags:    append([]core.BagBindingRef(nil), item.task.InputBags...),
 				Result:       core.TaskResultCodeFail,
 			}
 		}
@@ -200,7 +208,9 @@ func (r *TaskRuntime) worker() {
 			_ = r.logger.LogTaskMeta(item.task.RunID, "TaskRuntime", fmt.Sprintf("worker feedback runtime_id=%s agent_id=%s", item.runtimeID, instance.agentID), feedback)
 		}
 		if r.sink != nil {
-			_ = r.sink.OnFeedback(context.Background(), feedback)
+			if err := r.sink.OnFeedback(context.Background(), feedback); err != nil && r.logger != nil {
+				_ = r.logger.Log(item.task.RunID, "TaskRuntime", fmt.Sprintf("feedback sink error task_id=%s: %v", feedback.TaskID, err))
+			}
 		}
 	}
 }

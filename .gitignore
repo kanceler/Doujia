@@ -1,7 +1,12 @@
 docs/
 runtime/workspaces/*
 !runtime/workspaces/.gitkeep
+runtime/devflow-server.log
+runtime/doujiagit-demo/
+runtime/devflow/
 .llm.test.local.ps1
 .llm.probe.local.ps1
+.gocache/
+.tmp/
 internal/orchestrator/projects/
 tools/coding-agent/vendor/

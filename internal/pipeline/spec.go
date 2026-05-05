@@ -3,13 +3,15 @@ package pipeline
 import "devflow/internal/core"
 
 type StageSpec struct {
-	ID         core.StageID
-	Name       string
-	AgentRole  core.AgentRole
-	AgentAlias core.AgentID
-	Op         string
-	DependsOn  *core.StageID
-	External   bool
+	ID           core.StageID
+	Name         string
+	AgentRole    core.AgentRole
+	AgentAlias   core.AgentID
+	Op           string
+	DependsOnIDs []core.StageID
+	External     bool
+	InputBags    []BagSpec
+	OutputBags   []BagSpec
 }
 
 type PipelineSpec struct {

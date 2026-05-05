@@ -13,9 +13,16 @@ import (
 type Session struct {
 	ID            core.SessionID
 	RunID         core.RunID
-	CEOAgent      core.AgentID
+	Role          core.AgentRole
+	AgentID       core.AgentID
 	WorkspacePath string
 	Agent         Agent
+}
+
+type SessionTemplate struct {
+	Role    core.AgentRole
+	AgentID core.AgentID
+	Factory Agent
 }
 
 type SessionRuntime interface {
@@ -25,27 +32,34 @@ type SessionRuntime interface {
 }
 
 type InMemorySessionRuntime struct {
-	mu         sync.RWMutex
-	byRunID    map[core.RunID]Session
-	ceoFactory Agent
-	logger     logging.RunLogger
-	config     AgentRuntimeConfig
-	sink       FeedbackSink
-	execCtx    context.Context
+	mu       sync.RWMutex
+	byRunID  map[core.RunID]Session
+	template SessionTemplate
+	resolver InputBundleResolver
+	logger   logging.RunLogger
+	config   AgentRuntimeConfig
+	sink     FeedbackSink
+	execCtx  context.Context
 }
 
-func NewInMemorySessionRuntime(ceoFactory Agent, logger logging.RunLogger, config AgentRuntimeConfig) *InMemorySessionRuntime {
+func NewInMemorySessionRuntime(template SessionTemplate, logger logging.RunLogger, config AgentRuntimeConfig) *InMemorySessionRuntime {
 	return &InMemorySessionRuntime{
-		byRunID:    make(map[core.RunID]Session),
-		ceoFactory: ceoFactory,
-		logger:     logger,
-		config:     config,
-		execCtx:    context.Background(),
+		byRunID:  make(map[core.RunID]Session),
+		template: normalizeSessionTemplate(template),
+		logger:   logger,
+		config:   config,
+		execCtx:  context.Background(),
 	}
 }
 
 func (r *InMemorySessionRuntime) SetFeedbackSink(sink FeedbackSink) {
 	r.sink = sink
+}
+
+func (r *InMemorySessionRuntime) SetInputBundleResolver(resolver InputBundleResolver) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.resolver = resolver
 }
 
 func (r *InMemorySessionRuntime) SetExecutionContext(ctx context.Context) {
@@ -65,33 +79,32 @@ func (r *InMemorySessionRuntime) CreateSession(ctx context.Context, run core.Pip
 	if existing, ok := r.byRunID[runID]; ok {
 		return existing, nil
 	}
+	template := normalizeSessionTemplate(r.template)
 	projectRoot := run.ProjectDir
-	workspacePath := filepath.Join(projectRoot, "agents", "ceo")
+	workspacePath := filepath.Join(projectRoot, "agents", string(template.AgentID))
 	if err := os.MkdirAll(workspacePath, 0o755); err != nil {
 		return Session{}, err
 	}
 	session := Session{
 		ID:            core.SessionID(fmt.Sprintf("%s_session", runID)),
 		RunID:         runID,
-		CEOAgent:      "ceo",
+		Role:          template.Role,
+		AgentID:       template.AgentID,
 		WorkspacePath: workspacePath,
 	}
 	init := AgentInit{
-		AgentID:       "ceo",
-		RuntimeID:     core.RuntimeID(fmt.Sprintf("%s_ceo_runtime", runID)),
+		AgentID:       template.AgentID,
+		RuntimeID:     core.RuntimeID(fmt.Sprintf("%s_%s_runtime", runID, template.AgentID)),
 		RunID:         runID,
 		RunRoot:       projectRoot,
 		RunConfig:     run.Config,
 		WorkspacePath: workspacePath,
 	}
-	if err := loadTaskHistory(ctx, &init, r.config); err != nil {
-		return Session{}, err
-	}
 	deps, err := buildAgentDeps(init, r.config)
 	if err != nil {
 		return Session{}, err
 	}
-	session.Agent = r.ceoFactory.Create(init, deps)
+	session.Agent = template.Factory.Create(init, deps)
 	r.byRunID[runID] = session
 	if r.logger != nil {
 		_ = r.logger.Log(runID, "SessionRuntime", fmt.Sprintf("session created: session_id=%s workspace=%s", session.ID, session.WorkspacePath))
@@ -114,6 +127,24 @@ func (r *InMemorySessionRuntime) DispatchToSession(ctx context.Context, task cor
 	if err != nil {
 		return err
 	}
+	r.mu.RLock()
+	resolver := r.resolver
+	r.mu.RUnlock()
+	if resolver != nil && (len(task.InputBags) > 0 || len(task.InputBagIDs) > 0) && task.InputBundle == nil {
+		inputBags := task.InputBags
+		if len(inputBags) == 0 {
+			inputBags = InputBagBindingsFromIDs(task.InputBagIDs)
+		}
+		bundle, err := resolver.ResolveInputBundle(ctx, inputBags)
+		if err != nil {
+			return fmt.Errorf("resolve input bags for session task %q: %w", task.TaskID, err)
+		}
+		task.InputBags = append([]core.BagBindingRef(nil), inputBags...)
+		task.InputBundle = &bundle
+	}
+	if len(task.ArtifactURIs) == 0 && task.InputBundle != nil {
+		task.ArtifactURIs = artifactURIsFromInputBundle(*task.InputBundle)
+	}
 	if r.logger != nil {
 		_ = r.logger.LogTaskMeta(task.RunID, "SessionRuntime", "dispatch_to_session", task)
 	}
@@ -124,10 +155,11 @@ func (r *InMemorySessionRuntime) DispatchToSession(ctx context.Context, task cor
 			RunID:        task.RunID,
 			TaskID:       task.TaskID,
 			ParentID:     task.ParentID,
-			DependsOn:    task.DependsOn,
 			DependsOnIDs: task.DependsOnIDs,
-			AgentID:      session.CEOAgent,
+			AgentID:      session.AgentID,
 			Op:           task.Op,
+			InputBagIDs:  append([]string(nil), task.InputBagIDs...),
+			InputBags:    append([]core.BagBindingRef(nil), task.InputBags...),
 			Result:       core.TaskResultCodeFail,
 		}
 	}
@@ -147,4 +179,14 @@ func (r *InMemorySessionRuntime) executionContext(fallback context.Context) cont
 		return fallback
 	}
 	return context.Background()
+}
+
+func normalizeSessionTemplate(template SessionTemplate) SessionTemplate {
+	if template.Role == "" {
+		template.Role = core.AgentRoleCEO
+	}
+	if template.AgentID == "" {
+		template.AgentID = core.AgentID(template.Role)
+	}
+	return template
 }
