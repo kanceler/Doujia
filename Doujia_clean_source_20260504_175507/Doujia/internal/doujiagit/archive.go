@@ -24,19 +24,20 @@ const (
 )
 
 type RunArchive struct {
-	SchemaVersion     string                `json:"schema_version"`
-	ExportedAt        time.Time             `json:"exported_at"`
-	SourceRunID       core.RunID            `json:"source_run_id"`
-	SourceRefName     string                `json:"source_ref_name"`
-	Ref               Ref                   `json:"ref"`
-	Objects           []ArtifactObject      `json:"objects"`
-	LogicalArtifacts  []LogicalArtifact     `json:"logical_artifacts"`
-	ArtifactVersions  []ArtifactVersion     `json:"artifact_versions"`
-	Bags              []ArtifactBag         `json:"bags"`
-	Snapshots         []TaskSnapshot        `json:"snapshots"`
-	FrontierSnapshots []FrontierSnapshot    `json:"frontier_snapshots"`
-	RefMoveEvents     []RefMoveEvent        `json:"ref_move_events"`
-	ArtifactFiles     []ArchiveArtifactFile `json:"artifact_files,omitempty"`
+	SchemaVersion       string                       `json:"schema_version"`
+	ExportedAt          time.Time                    `json:"exported_at"`
+	SourceRunID         core.RunID                   `json:"source_run_id"`
+	SourceRefName       string                       `json:"source_ref_name"`
+	Ref                 Ref                          `json:"ref"`
+	Objects             []ArtifactObject             `json:"objects"`
+	LogicalArtifacts    []LogicalArtifact            `json:"logical_artifacts"`
+	ArtifactVersions    []ArtifactVersion            `json:"artifact_versions"`
+	Bags                []ArtifactBag                `json:"bags"`
+	Snapshots           []TaskSnapshot               `json:"snapshots"`
+	FrontierSnapshots   []FrontierSnapshot           `json:"frontier_snapshots"`
+	RefMoveEvents       []RefMoveEvent               `json:"ref_move_events"`
+	ProcessingDecisions []SnapshotProcessingDecision `json:"processing_decisions,omitempty"`
+	ArtifactFiles       []ArchiveArtifactFile        `json:"artifact_files,omitempty"`
 }
 
 type ArchiveArtifactFile struct {
@@ -106,6 +107,10 @@ func ExportRunArchive(ctx context.Context, repository Repository, opts ExportOpt
 	if err != nil {
 		return RunArchive{}, err
 	}
+	decisions, err := repository.ListSnapshotProcessingDecisions(ctx, opts.RunID, ref.RefName)
+	if err != nil {
+		return RunArchive{}, err
+	}
 
 	versionsByID := make(map[string]ArtifactVersion)
 	logicalsByID := make(map[string]LogicalArtifact)
@@ -141,18 +146,19 @@ func ExportRunArchive(ctx context.Context, repository Repository, opts ExportOpt
 	}
 
 	archive := RunArchive{
-		SchemaVersion:     ArchiveSchemaVersion,
-		ExportedAt:        exportedAt.UTC(),
-		SourceRunID:       opts.RunID,
-		SourceRefName:     ref.RefName,
-		Ref:               ref,
-		Objects:           sortedMapValues(objectsByID, func(item ArtifactObject) string { return item.ObjectID }),
-		LogicalArtifacts:  sortedMapValues(logicalsByID, func(item LogicalArtifact) string { return item.LogicalArtifactID }),
-		ArtifactVersions:  sortedMapValues(versionsByID, func(item ArtifactVersion) string { return item.ArtifactVersionID }),
-		Bags:              append([]ArtifactBag(nil), bags...),
-		Snapshots:         append([]TaskSnapshot(nil), snapshots...),
-		FrontierSnapshots: append([]FrontierSnapshot(nil), frontiers...),
-		RefMoveEvents:     append([]RefMoveEvent(nil), moves...),
+		SchemaVersion:       ArchiveSchemaVersion,
+		ExportedAt:          exportedAt.UTC(),
+		SourceRunID:         opts.RunID,
+		SourceRefName:       ref.RefName,
+		Ref:                 ref,
+		Objects:             sortedMapValues(objectsByID, func(item ArtifactObject) string { return item.ObjectID }),
+		LogicalArtifacts:    sortedMapValues(logicalsByID, func(item LogicalArtifact) string { return item.LogicalArtifactID }),
+		ArtifactVersions:    sortedMapValues(versionsByID, func(item ArtifactVersion) string { return item.ArtifactVersionID }),
+		Bags:                append([]ArtifactBag(nil), bags...),
+		Snapshots:           append([]TaskSnapshot(nil), snapshots...),
+		FrontierSnapshots:   append([]FrontierSnapshot(nil), frontiers...),
+		RefMoveEvents:       append([]RefMoveEvent(nil), moves...),
+		ProcessingDecisions: append([]SnapshotProcessingDecision(nil), decisions...),
 	}
 	sortRunArchive(&archive)
 	return archive, nil
@@ -339,6 +345,12 @@ func ImportRunArchive(ctx context.Context, repository Repository, archive RunArc
 		mapping.refMove[event.EventID] = newID
 		mapping.all[event.EventID] = newID
 	}
+	for _, decision := range archive.ProcessingDecisions {
+		newSnapshotID := rewriteID(decision.SnapshotID, mapping.snapshot)
+		newID := StableSnapshotProcessingDecisionID(opts.NewRunID, targetRefName, newSnapshotID, decision.Status)
+		mapping.processingDecision[decision.DecisionID] = newID
+		mapping.all[decision.DecisionID] = newID
+	}
 
 	fileByObjectID := make(map[string]ArchiveArtifactFile, len(archive.ArtifactFiles))
 	for _, file := range archive.ArtifactFiles {
@@ -395,6 +407,15 @@ func ImportRunArchive(ctx context.Context, repository Repository, archive RunArc
 		newSnapshot := snapshot
 		newSnapshot.RunID = opts.NewRunID
 		newSnapshot.SnapshotID = mapping.snapshot[snapshot.SnapshotID]
+		newSnapshot.SnapshotVersionID = replaceKnownIDs(snapshot.SnapshotVersionID, mapping.all)
+		newSnapshot.BranchFromSnapshotID = rewriteID(snapshot.BranchFromSnapshotID, mapping.snapshot)
+		newSnapshot.RecoverFromSnapshotID = rewriteID(snapshot.RecoverFromSnapshotID, mapping.snapshot)
+		newSnapshot.RecoverTargetSnapshotIDs = rewriteIDs(snapshot.RecoverTargetSnapshotIDs, mapping.snapshot)
+		newSnapshot.ReusableSnapshotIDs = rewriteIDs(snapshot.ReusableSnapshotIDs, mapping.snapshot)
+		newSnapshot.RecoverAnchorSnapshotIDs = rewriteIDs(snapshot.RecoverAnchorSnapshotIDs, mapping.snapshot)
+		newSnapshot.PreviousAttemptSnapshotIDs = rewriteIDs(snapshot.PreviousAttemptSnapshotIDs, mapping.snapshot)
+		newSnapshot.FailureReportBagIDs = rewriteIDs(snapshot.FailureReportBagIDs, mapping.bag)
+		newSnapshot.PreviousOutputBagIDs = rewriteIDs(snapshot.PreviousOutputBagIDs, mapping.bag)
 		newSnapshot.InputBagIDs = rewriteIDs(snapshot.InputBagIDs, mapping.bag)
 		newSnapshot.OutputBagIDs = rewriteIDs(snapshot.OutputBagIDs, mapping.bag)
 		newSnapshot.DiagnosticsJSON = replaceKnownIDs(snapshot.DiagnosticsJSON, mapping.all)
@@ -420,6 +441,7 @@ func ImportRunArchive(ctx context.Context, repository Repository, archive RunArc
 	newRef.RefName = targetRefName
 	newRef.RunID = opts.NewRunID
 	newRef.FrontierSnapshotID = rewriteID(archive.Ref.FrontierSnapshotID, mapping.frontier)
+	newRef.FrontierMemberSnapshotIDs = rewriteIDs(archive.Ref.FrontierMemberSnapshotIDs, mapping.snapshot)
 	newRef.FrontierSnapshotIDs = rewriteIDs(archive.Ref.FrontierSnapshotIDs, mapping.snapshot)
 	newRef.UpdatedAt = importedAt.UTC()
 	if err := repository.UpdateRef(ctx, newRef); err != nil {
@@ -438,6 +460,29 @@ func ImportRunArchive(ctx context.Context, repository Repository, archive RunArc
 			return ImportResult{}, err
 		}
 	}
+	for _, decision := range archive.ProcessingDecisions {
+		newDecision := decision
+		newDecision.DecisionID = mapping.processingDecision[decision.DecisionID]
+		newDecision.RunID = opts.NewRunID
+		newDecision.RefName = targetRefName
+		newDecision.SnapshotID = rewriteID(decision.SnapshotID, mapping.snapshot)
+		newDecision.SnapshotVersionID = replaceKnownIDs(decision.SnapshotVersionID, mapping.all)
+		newDecision.ConsumedSnapshotIDs = rewriteIDs(decision.ConsumedSnapshotIDs, mapping.snapshot)
+		newDecision.ProducedSnapshotIDs = rewriteIDs(decision.ProducedSnapshotIDs, mapping.snapshot)
+		newDecision.FromFrontierSnapshotID = rewriteID(decision.FromFrontierSnapshotID, mapping.frontier)
+		newDecision.ToFrontierSnapshotID = rewriteID(decision.ToFrontierSnapshotID, mapping.frontier)
+		newDecision.RecoverTargetSnapshotIDs = rewriteIDs(decision.RecoverTargetSnapshotIDs, mapping.snapshot)
+		newDecision.ReusableSnapshotIDs = rewriteIDs(decision.ReusableSnapshotIDs, mapping.snapshot)
+		newDecision.RecoverAnchorSnapshotIDs = rewriteIDs(decision.RecoverAnchorSnapshotIDs, mapping.snapshot)
+		newDecision.FailedSnapshotID = rewriteID(decision.FailedSnapshotID, mapping.snapshot)
+		newDecision.PreviousAttemptSnapshotIDs = rewriteIDs(decision.PreviousAttemptSnapshotIDs, mapping.snapshot)
+		newDecision.FailureReportBagIDs = rewriteIDs(decision.FailureReportBagIDs, mapping.bag)
+		newDecision.PreviousOutputBagIDs = rewriteIDs(decision.PreviousOutputBagIDs, mapping.bag)
+		newDecision.Reason = replaceKnownIDs(decision.Reason, mapping.all)
+		if err := repository.CreateSnapshotProcessingDecision(ctx, newDecision); err != nil {
+			return ImportResult{}, err
+		}
+	}
 
 	return ImportResult{
 		RunID:              opts.NewRunID,
@@ -449,24 +494,26 @@ func ImportRunArchive(ctx context.Context, repository Repository, archive RunArc
 }
 
 type archiveIDMapping struct {
-	logical  map[string]string
-	version  map[string]string
-	bag      map[string]string
-	snapshot map[string]string
-	frontier map[string]string
-	refMove  map[string]string
-	all      map[string]string
+	logical            map[string]string
+	version            map[string]string
+	bag                map[string]string
+	snapshot           map[string]string
+	frontier           map[string]string
+	refMove            map[string]string
+	processingDecision map[string]string
+	all                map[string]string
 }
 
 func newArchiveIDMapping() archiveIDMapping {
 	return archiveIDMapping{
-		logical:  make(map[string]string),
-		version:  make(map[string]string),
-		bag:      make(map[string]string),
-		snapshot: make(map[string]string),
-		frontier: make(map[string]string),
-		refMove:  make(map[string]string),
-		all:      make(map[string]string),
+		logical:            make(map[string]string),
+		version:            make(map[string]string),
+		bag:                make(map[string]string),
+		snapshot:           make(map[string]string),
+		frontier:           make(map[string]string),
+		refMove:            make(map[string]string),
+		processingDecision: make(map[string]string),
+		all:                make(map[string]string),
 	}
 }
 
@@ -507,6 +554,12 @@ func sortRunArchive(archive *RunArchive) {
 			return archive.RefMoveEvents[i].CreatedAt.Before(archive.RefMoveEvents[j].CreatedAt)
 		}
 		return archive.RefMoveEvents[i].EventID < archive.RefMoveEvents[j].EventID
+	})
+	sort.Slice(archive.ProcessingDecisions, func(i, j int) bool {
+		if !archive.ProcessingDecisions[i].CreatedAt.Equal(archive.ProcessingDecisions[j].CreatedAt) {
+			return archive.ProcessingDecisions[i].CreatedAt.Before(archive.ProcessingDecisions[j].CreatedAt)
+		}
+		return archive.ProcessingDecisions[i].DecisionID < archive.ProcessingDecisions[j].DecisionID
 	})
 }
 

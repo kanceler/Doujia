@@ -313,7 +313,7 @@ func buildBundledPipelineRegistries() (pipeline.Registry, pipeline.DefinitionReg
 func bundledPipelineRegistryPath() string {
 	_, file, _, ok := stdruntime.Caller(0)
 	if !ok {
-		return filepath.Join("docs", "v2", "pipeline_full_delivery.spec.json")
+		return filepath.Join("internal", "orchestrator", "testdata", "full_delivery", "pipeline_full_delivery.spec.json")
 	}
-	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "orchestrator", "testdata", "full_delivery", "pipeline_full_delivery.spec.json"))
 }

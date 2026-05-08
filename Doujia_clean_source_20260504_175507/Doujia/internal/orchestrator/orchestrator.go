@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -18,6 +19,8 @@ import (
 	"devflow/internal/runtime"
 	"devflow/internal/state/repo"
 )
+
+var ErrDoujiaGitRequired = errors.New("doujiagit repository is required for scheduling")
 
 type Service struct {
 	pipelines         pipeline.Registry
@@ -38,6 +41,13 @@ type Service struct {
 	logger            logging.RunLogger
 }
 
+func (s *Service) requireDoujiaGit() (doujiagit.Repository, error) {
+	if s == nil || s.doujiaGit == nil {
+		return nil, ErrDoujiaGitRequired
+	}
+	return s.doujiaGit, nil
+}
+
 type ResumeResult struct {
 	RunID                 core.RunID     `json:"run_id"`
 	RefName               string         `json:"ref_name"`
@@ -50,6 +60,7 @@ type ResumeResult struct {
 
 type taskSnapshotRuntimeContext struct {
 	Task             taskRuntimeSnapshot              `json:"task"`
+	OutputBags       []core.BagBindingRef             `json:"output_bags,omitempty"`
 	PipelineInstance *pipelineInstanceRuntimeSnapshot `json:"pipeline_instance,omitempty"`
 }
 
@@ -175,7 +186,7 @@ func (s *Service) ResumeFromRef(ctx context.Context, runID core.RunID, refName s
 				return ResumeResult{}, err
 			}
 		}
-		if err := s.advanceReadyTasks(ctx, run); err != nil {
+		if err := s.advanceByFacts(ctx, run); err != nil {
 			return ResumeResult{}, err
 		}
 		latest, err := s.runs.Get(ctx, runID)
@@ -291,6 +302,7 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 		return s.handlePipelineInstanceTaskFeedback(ctx, run, task, feedback)
 	}
 
+	var fact feedbackFactContext
 	switch feedback.Result {
 	case core.TaskResultCodeOK:
 		if len(feedback.Control) > 0 {
@@ -318,7 +330,7 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 				return s.createResplitTask(ctx, run, task, feedback, fmt.Errorf("start_pipeline control requires pipeline definitions and instance repository"))
 			}
 		}
-		task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusDone)
+		task, fact, err = s.updateTaskFromFeedbackWithFact(ctx, task, feedback, core.TaskStatusDone, doujiagit.RefMoveModeAdvance)
 		if err != nil {
 			return err
 		}
@@ -331,22 +343,30 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 			}
 			return s.expandControlTasks(ctx, run, task, feedback.Control)
 		}
+		if fact.Committed && feedback.Result == core.TaskResultCodeOK && task.ExecutionMode != core.ExecutionModeRepair {
+			return s.advanceByFacts(ctx, run)
+		}
 	case core.TaskResultCodeRewrite, core.TaskResultCodeReplan:
-		task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusBlocked)
+		task, fact, err = s.updateTaskFromFeedbackWithFact(ctx, task, feedback, core.TaskStatusBlocked, doujiagit.RefMoveModeAdvance)
 		if err != nil {
 			return err
 		}
-		return s.createChildTask(ctx, run, task, feedback)
+		return s.createChildTaskWithFact(ctx, run, task, feedback, fact)
 	case core.TaskResultCodeControlInvalid:
-		task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusBlocked)
+		task, fact, err = s.updateTaskFromFeedbackWithFact(ctx, task, feedback, core.TaskStatusBlocked, doujiagit.RefMoveModeAdvance)
 		if err != nil {
 			return err
 		}
-		return s.createResplitTask(ctx, run, task, feedback, fmt.Errorf("agent reported invalid control"))
+		return s.createResplitTaskWithFact(ctx, run, task, feedback, fmt.Errorf("agent reported invalid control"), fact)
 	default:
-		task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusFailed)
+		task, fact, err = s.updateTaskFromFeedbackWithFact(ctx, task, feedback, core.TaskStatusFailed, doujiagit.RefMoveModeAdvance)
 		if err != nil {
 			return err
+		}
+		if fact.Committed {
+			if err := s.advanceByFacts(ctx, run); err != nil {
+				return err
+			}
 		}
 		run.Status = core.RunStatusFailed
 		run.UpdatedAt = time.Now().UTC()
@@ -366,6 +386,9 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 	}
 	nextStage, ok := findNextStage(spec, task.StageID)
 	if !ok {
+		if handled, err := s.advanceRootPipelineFromLegacyTerminalTask(ctx, run, task, feedback, fact); err != nil || handled {
+			return err
+		}
 		return s.markRunAwaitingAcceptance(ctx, run, task.ID, "root_pipeline_complete")
 	}
 
@@ -396,10 +419,49 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 		return s.tasks.Create(ctx, nextTask)
 	}
 
-	return s.dispatchTask(ctx, run, nextTask, nextStage.Op, feedback.ArtifactURIs)
+	return s.dispatchTaskWithFact(ctx, run, nextTask, nextStage.Op, feedback.ArtifactURIs, fact)
+}
+
+func (s *Service) advanceRootPipelineFromLegacyTerminalTask(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData, fact feedbackFactContext) (bool, error) {
+	if s.instances == nil || s.definitions == nil || task.PipelineInstanceID != "" || task.ParentID != nil {
+		return false, nil
+	}
+	instance, err := s.ensureRootPipelineInstance(ctx, run)
+	if err != nil {
+		return false, err
+	}
+	def, err := s.definitions.GetDef(ctx, instance.PipelineID)
+	if err != nil {
+		return false, nil
+	}
+	transition, ok := findTransition(def, string(task.StageID))
+	if !ok {
+		return false, nil
+	}
+	if err := s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, transition.ToState, feedback.Result, fact); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Service) updateTaskFromFeedback(ctx context.Context, task core.Task, feedback core.TaskMetaData, status core.TaskStatus) (core.Task, error) {
+	task, _, err := s.updateTaskFromFeedbackWithFact(ctx, task, feedback, status, doujiagit.RefMoveModeAdvance)
+	return task, err
+}
+
+func (s *Service) updateTaskFromFeedbackWithFact(ctx context.Context, task core.Task, feedback core.TaskMetaData, status core.TaskStatus, arrivalKind string) (core.Task, feedbackFactContext, error) {
+	fact, err := s.commitFeedbackFact(ctx, task, feedback, arrivalKind)
+	if err != nil {
+		return core.Task{}, feedbackFactContext{}, err
+	}
+	task, err = s.updateTaskStateFromFeedback(ctx, task, feedback, status, fact)
+	if err != nil {
+		return core.Task{}, feedbackFactContext{}, err
+	}
+	return task, fact, nil
+}
+
+func (s *Service) updateTaskStateFromFeedback(ctx context.Context, task core.Task, feedback core.TaskMetaData, status core.TaskStatus, fact feedbackFactContext) (core.Task, error) {
 	task.Status = status
 	if strings.TrimSpace(task.Op) == "" {
 		task.Op = feedback.Op
@@ -407,12 +469,8 @@ func (s *Service) updateTaskFromFeedback(ctx context.Context, task core.Task, fe
 	task.Result = feedback.Result
 	task.OutputArtifactRefs = toArtifactRefs(feedback.ArtifactURIs)
 	task.UpdatedAt = time.Now().UTC()
-	outputBagIDs, err := s.recordDoujiaGitSnapshot(ctx, task, feedback)
-	if err != nil {
-		return core.Task{}, err
-	}
-	if len(outputBagIDs) > 0 {
-		task.OutputBagIDs = outputBagIDs
+	if len(fact.OutputBagIDs) > 0 {
+		task.OutputBagIDs = append([]string(nil), fact.OutputBagIDs...)
 	} else if shouldForwardInputBags(task, feedback, status) {
 		task.OutputBagIDs = append([]string(nil), task.InputBagIDs...)
 	}
@@ -438,7 +496,7 @@ func (s *Service) handlePipelineInstanceTaskFeedback(ctx context.Context, run co
 		if feedback.Result == core.TaskResultCodeBug {
 			status = core.TaskStatusBlocked
 		}
-		task, err := s.updateTaskFromFeedback(ctx, task, feedback, status)
+		task, fact, err := s.updateTaskFromFeedbackWithFact(ctx, task, feedback, status, doujiagit.RefMoveModeAdvance)
 		if err != nil {
 			return err
 		}
@@ -488,7 +546,15 @@ func (s *Service) handlePipelineInstanceTaskFeedback(ctx context.Context, run co
 		if err := s.instances.Update(ctx, instance); err != nil {
 			return err
 		}
+		if fact.Committed && feedback.Result == core.TaskResultCodeOK && task.ExecutionMode != core.ExecutionModeRepair {
+			return s.advanceByFacts(ctx, run)
+		}
 		if task.ExecutionMode == core.ExecutionModeRepair && feedback.Result == core.TaskResultCodeOK && task.ExceptionFrameID != "" {
+			if fact.Committed {
+				if err := s.advanceByFacts(ctx, run); err != nil {
+					return err
+				}
+			}
 			if handled, err := s.handleRepairHandlerSuccess(ctx, run, instance, def, transition, task, feedback); err != nil || handled {
 				return err
 			}
@@ -498,7 +564,7 @@ func (s *Service) handlePipelineInstanceTaskFeedback(ctx context.Context, run co
 				return err
 			}
 		}
-		return s.advancePipelineInstanceAfterTransition(ctx, run, instance, def, transition.ToState, feedback.Result)
+		return s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, transition.ToState, feedback.Result, fact)
 	default:
 		if _, err := s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusFailed); err != nil {
 			return err
@@ -574,18 +640,152 @@ func firstString(items []string) string {
 	return strings.TrimSpace(items[0])
 }
 
-func (s *Service) recordDoujiaGitSnapshot(ctx context.Context, task core.Task, feedback core.TaskMetaData) ([]string, error) {
-	if s.doujiaGit == nil || feedback.Commit == nil {
-		return nil, nil
+type feedbackFactContext struct {
+	SnapshotID         string
+	SnapshotVersionID  string
+	FrontierSnapshotID string
+	RefName            string
+	OutputBagIDs       []string
+	Committed          bool
+}
+
+type activeRefMember struct {
+	Ref      doujiagit.Ref
+	Snapshot doujiagit.TaskSnapshot
+}
+
+type activeRefAdvanceResult struct {
+	Consumed                    bool
+	Status                      string
+	DecisionKind                string
+	ContinuationID              string
+	Reason                      string
+	ProducedTaskIDs             []string
+	ProducedPipelineInstanceIDs []string
+	Replacement                 frontierReplacement
+	ReplacementResult           frontierReplacementResult
+}
+
+type frontierReplacement struct {
+	RefName                string
+	RunID                  core.RunID
+	FromFrontierSnapshotID string
+	ConsumedSnapshotIDs    []string
+	ProducedSnapshotIDs    []string
+	Mode                   string
+	Reason                 string
+}
+
+type frontierReplacementResult struct {
+	ToFrontierSnapshotID string
+	NewMemberSnapshotIDs []string
+}
+
+type runFactProjection struct {
+	RunID                   core.RunID
+	RefName                 string
+	FrontierSnapshotID      string
+	ActiveSnapshotIDs       []string
+	UnconsumedSnapshotIDs   []string
+	InFlightTaskIDs         []string
+	TerminalSnapshotIDs     []string
+	FailedSnapshotIDs       []string
+	AwaitingAcceptance      bool
+	HasAdvanceableWork      bool
+	LegacyRunStatus         core.RunStatus
+	LegacyProjectionIsStale bool
+}
+
+func (s *Service) buildRunFactProjection(ctx context.Context, run core.PipelineRun) (runFactProjection, error) {
+	repository, err := s.requireDoujiaGit()
+	if err != nil {
+		return runFactProjection{}, err
+	}
+	projection := runFactProjection{
+		RunID:           run.ID,
+		RefName:         doujiagit.DefaultRefName,
+		LegacyRunStatus: run.Status,
+	}
+	ref, err := repository.GetRef(ctx, run.ID, doujiagit.DefaultRefName)
+	if err != nil {
+		projection.LegacyProjectionIsStale = run.Status == core.RunStatusFailed
+		return projection, nil
+	}
+	projection.RefName = ref.RefName
+	projection.FrontierSnapshotID = ref.FrontierSnapshotID
+	memberIDs := doujiagit.NormalizeIDs(ref.FrontierMemberSnapshotIDs)
+	if len(memberIDs) == 0 && strings.TrimSpace(ref.FrontierSnapshotID) != "" {
+		frontier, err := repository.GetFrontierSnapshot(ctx, ref.FrontierSnapshotID)
+		if err != nil {
+			return runFactProjection{}, err
+		}
+		memberIDs = doujiagit.NormalizeIDs(frontier.TaskSnapshotIDs)
+	}
+	projection.ActiveSnapshotIDs = append([]string(nil), memberIDs...)
+	for _, snapshotID := range memberIDs {
+		snapshot, err := repository.GetSnapshot(ctx, snapshotID)
+		if err != nil {
+			return runFactProjection{}, err
+		}
+		decision, err := repository.GetSnapshotProcessingDecision(ctx, run.ID, ref.RefName, snapshotID)
+		consumed := false
+		if err == nil {
+			switch decision.Status {
+			case doujiagit.SnapshotProcessingStatusAdvanced:
+				consumed = true
+			case doujiagit.SnapshotProcessingStatusTerminal:
+				consumed = true
+				projection.TerminalSnapshotIDs = append(projection.TerminalSnapshotIDs, snapshotID)
+			}
+		}
+		if !consumed {
+			projection.UnconsumedSnapshotIDs = append(projection.UnconsumedSnapshotIDs, snapshotID)
+			if snapshot.Result == core.TaskResultCodeOK {
+				projection.HasAdvanceableWork = true
+			}
+		}
+		if snapshot.Result != "" && snapshot.Result != core.TaskResultCodeOK {
+			projection.FailedSnapshotIDs = append(projection.FailedSnapshotIDs, snapshotID)
+		}
+	}
+	projection.ActiveSnapshotIDs = doujiagit.NormalizeIDs(projection.ActiveSnapshotIDs)
+	projection.UnconsumedSnapshotIDs = doujiagit.NormalizeIDs(projection.UnconsumedSnapshotIDs)
+	projection.TerminalSnapshotIDs = doujiagit.NormalizeIDs(projection.TerminalSnapshotIDs)
+	projection.FailedSnapshotIDs = doujiagit.NormalizeIDs(projection.FailedSnapshotIDs)
+	if run.Status == core.RunStatusFailed && len(projection.FailedSnapshotIDs) == 0 {
+		projection.LegacyProjectionIsStale = true
+	}
+	return projection, nil
+}
+
+func (s *Service) syncLegacyStatusProjection(ctx context.Context, run core.PipelineRun, projection runFactProjection) error {
+	if projection.LegacyProjectionIsStale && run.Status == core.RunStatusFailed && len(projection.FailedSnapshotIDs) == 0 {
+		run.Status = core.RunStatusRunning
+		run.UpdatedAt = s.uniqueTimestamp()
+		return s.runs.Update(ctx, run)
+	}
+	return nil
+}
+
+func (s *Service) commitFeedbackFact(ctx context.Context, task core.Task, feedback core.TaskMetaData, arrivalKind string) (feedbackFactContext, error) {
+	if _, err := s.requireDoujiaGit(); err != nil {
+		return feedbackFactContext{}, err
 	}
 	now := s.uniqueTimestamp()
 	snapshotID := doujiagit.StableSnapshotID(task.RunID, task.ID, now)
-	committedBags := feedback.Commit.EffectiveCommittedBags()
+	snapshotVersionID := snapshotID + ":v1"
+	if strings.TrimSpace(arrivalKind) == "" {
+		arrivalKind = doujiagit.RefMoveModeAdvance
+	}
+	var committedBags []core.CommittedBagDef
+	if feedback.Commit != nil {
+		committedBags = feedback.Commit.EffectiveCommittedBags()
+	}
 	outputBagIDs := make([]string, 0, len(committedBags))
 	for _, def := range committedBags {
 		outputKey := strings.TrimSpace(def.Name)
 		if outputKey == "" {
-			return nil, fmt.Errorf("committed bag name is required")
+			return feedbackFactContext{}, fmt.Errorf("committed bag name is required")
 		}
 		bagID := doujiagit.StableBagID(task.RunID, snapshotID, indexedBagLookupKey(outputKey, def.Indexes))
 		if err := s.doujiaGit.CreateBag(ctx, doujiagit.ArtifactBag{
@@ -594,9 +794,13 @@ func (s *Service) recordDoujiaGitSnapshot(ctx context.Context, task core.Task, f
 			ArtifactVersionIDs: def.ArtifactVersionIDs,
 			CreatedAt:          now,
 		}); err != nil {
-			return nil, err
+			return feedbackFactContext{}, err
 		}
 		outputBagIDs = append(outputBagIDs, bagID)
+	}
+	diagnosticsJSON := ""
+	if feedback.Commit != nil {
+		diagnosticsJSON = feedback.Commit.DiagnosticsJSON
 	}
 	inputBagIDs := feedback.InputBagIDs
 	if len(inputBagIDs) == 0 {
@@ -604,42 +808,836 @@ func (s *Service) recordDoujiaGitSnapshot(ctx context.Context, task core.Task, f
 	}
 	runtimeContextJSON, err := s.taskSnapshotRuntimeContextJSON(ctx, task, feedback, outputBagIDs)
 	if err != nil {
-		return nil, err
+		return feedbackFactContext{}, err
 	}
+	repairMetadata := s.repairSnapshotMetadata(ctx, task)
 	if err := s.doujiaGit.CreateSnapshot(ctx, doujiagit.TaskSnapshot{
-		SnapshotID:         snapshotID,
-		RunID:              task.RunID,
-		TaskID:             task.ID,
-		PipelineInstanceID: task.PipelineInstanceID,
-		TransitionID:       task.StageID,
-		AgentRole:          task.AgentRole,
-		AgentID:            task.AgentID,
-		Op:                 task.Op,
-		Result:             feedback.Result,
-		InputBagIDs:        inputBagIDs,
-		OutputBagIDs:       outputBagIDs,
-		DiagnosticsJSON:    feedback.Commit.DiagnosticsJSON,
-		RuntimeContextJSON: runtimeContextJSON,
-		CreatedAt:          now,
+		SnapshotID:                 snapshotID,
+		RunID:                      task.RunID,
+		TaskID:                     task.ID,
+		LogicalSnapshotID:          logicalSnapshotIDForTask(task),
+		SnapshotVersionID:          snapshotVersionID,
+		SnapshotVersionNo:          1,
+		ArrivalKind:                arrivalKind,
+		PipelineInstanceID:         task.PipelineInstanceID,
+		TransitionID:               task.StageID,
+		AgentRole:                  task.AgentRole,
+		AgentID:                    task.AgentID,
+		Op:                         task.Op,
+		Result:                     feedback.Result,
+		InputBagIDs:                inputBagIDs,
+		OutputBagIDs:               outputBagIDs,
+		DiagnosticsJSON:            diagnosticsJSON,
+		RuntimeContextJSON:         runtimeContextJSON,
+		CreatedAt:                  now,
+		BranchKind:                 repairMetadata.BranchKind,
+		BranchFromSnapshotID:       repairMetadata.BranchFromSnapshotID,
+		RecoverFromSnapshotID:      repairMetadata.RecoverFromSnapshotID,
+		RecoverTargetSnapshotIDs:   repairMetadata.RecoverTargetSnapshotIDs,
+		ReusableSnapshotIDs:        repairMetadata.ReusableSnapshotIDs,
+		RecoverAnchorSnapshotIDs:   repairMetadata.RecoverAnchorSnapshotIDs,
+		PreviousAttemptSnapshotIDs: repairMetadata.PreviousAttemptSnapshotIDs,
+		FailureReportBagIDs:        repairMetadata.FailureReportBagIDs,
+		PreviousOutputBagIDs:       repairMetadata.PreviousOutputBagIDs,
+		RepairTargetTransitionID:   repairMetadata.RepairTargetTransitionID,
+		RepairTargetTaskID:         repairMetadata.RepairTargetTaskID,
 	}); err != nil {
-		return nil, err
+		return feedbackFactContext{}, err
 	}
 	refName := doujiagit.DefaultRefName
-	if err := s.moveDoujiaGitRefWithRetry(ctx, task, snapshotID, refName, now); err != nil {
-		return nil, err
+	frontierSnapshotID, err := s.moveDoujiaGitRefWithRetry(ctx, task, snapshotID, refName, now, arrivalKind, s.consumedSnapshotIDsForFeedback(ctx, inputBagIDs))
+	if err != nil {
+		return feedbackFactContext{}, err
 	}
-	return outputBagIDs, nil
+	return feedbackFactContext{
+		SnapshotID:         snapshotID,
+		SnapshotVersionID:  snapshotVersionID,
+		FrontierSnapshotID: frontierSnapshotID,
+		RefName:            refName,
+		OutputBagIDs:       outputBagIDs,
+		Committed:          true,
+	}, nil
 }
 
-func (s *Service) moveDoujiaGitRefWithRetry(ctx context.Context, task core.Task, snapshotID string, refName string, now time.Time) error {
+type repairSnapshotMetadata struct {
+	BranchKind                 string
+	BranchFromSnapshotID       string
+	RecoverFromSnapshotID      string
+	RecoverTargetSnapshotIDs   []string
+	ReusableSnapshotIDs        []string
+	RecoverAnchorSnapshotIDs   []string
+	PreviousAttemptSnapshotIDs []string
+	FailureReportBagIDs        []string
+	PreviousOutputBagIDs       []string
+	RepairTargetTransitionID   string
+	RepairTargetTaskID         string
+}
+
+func (s *Service) repairSnapshotMetadata(ctx context.Context, task core.Task) repairSnapshotMetadata {
+	if task.ExecutionMode != core.ExecutionModeRepair || task.ExceptionFrameID == "" {
+		return repairSnapshotMetadata{}
+	}
+	meta := repairSnapshotMetadata{
+		BranchKind:               doujiagit.DecisionKindRepair,
+		RepairTargetTransitionID: string(task.StageID),
+		RepairTargetTaskID:       string(task.ID),
+	}
+	if s.doujiaGit == nil || s.instances == nil {
+		return meta
+	}
+	frame, owner, ok, err := s.findExceptionFrameOwner(ctx, task.RunID, task.ExceptionFrameID)
+	if err != nil || !ok {
+		return meta
+	}
+	repairOwner := owner
+	if len(frame.SelectedHandlers) > 0 {
+		if selectedOwner, err := s.instances.Get(ctx, task.RunID, frame.SelectedHandlers[0].OwnerInstanceID); err == nil {
+			repairOwner = selectedOwner
+		}
+	}
+	meta.FailureReportBagIDs = bagIDsFromBindings(frame.FailureBags)
+	meta.PreviousOutputBagIDs = previousOutputBagIDsForRepair(repairOwner, frame)
+	meta.ReusableSnapshotIDs = snapshotsProducingBags(ctx, s.doujiaGit, reusableBagIDsForRepair(repairOwner, frame))
+	meta.ReusableSnapshotIDs = doujiagit.NormalizeIDs(append(meta.ReusableSnapshotIDs, snapshotsProducingBags(ctx, s.doujiaGit, reusableFailedInputBagIDsForRepair(repairOwner, frame))...))
+	meta.RecoverAnchorSnapshotIDs = snapshotsProducingBags(ctx, s.doujiaGit, bagIDsForInstanceInputs(repairOwner))
+	meta.RecoverTargetSnapshotIDs = doujiagit.NormalizeIDs(append(append([]string(nil), meta.RecoverAnchorSnapshotIDs...), meta.ReusableSnapshotIDs...))
+	meta.BranchFromSnapshotID = firstString(meta.RecoverAnchorSnapshotIDs)
+	meta.RecoverFromSnapshotID = snapshotIDForTask(ctx, s.doujiaGit, task.RunID, frame.OriginTaskID)
+	if meta.RecoverFromSnapshotID != "" {
+		meta.PreviousAttemptSnapshotIDs = []string{meta.RecoverFromSnapshotID}
+		if len(meta.FailureReportBagIDs) == 0 {
+			if failedSnapshot, err := s.doujiaGit.GetSnapshot(ctx, meta.RecoverFromSnapshotID); err == nil {
+				meta.FailureReportBagIDs = append([]string(nil), failedSnapshot.OutputBagIDs...)
+			}
+		}
+	}
+	return meta
+}
+
+func previousOutputBagIDsForRepair(owner core.PipelineInstance, frame core.ExceptionFrame) []string {
+	out := make([]string, 0)
+	for _, binding := range frame.SelectedHandlers {
+		if binding.OwnerInstanceID != "" && binding.OwnerInstanceID != owner.ID {
+			continue
+		}
+		for _, replace := range binding.Replaces {
+			if strings.TrimSpace(replace.BagID) != "" {
+				out = append(out, replace.BagID)
+			}
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func reusableBagIDsForRepair(owner core.PipelineInstance, frame core.ExceptionFrame) []string {
+	previous := make(map[string]bool)
+	for _, id := range previousOutputBagIDsForRepair(owner, frame) {
+		previous[id] = true
+	}
+	out := make([]string, 0)
+	for _, bagID := range bagIDsForInstanceOutputs(owner) {
+		if previous[bagID] {
+			continue
+		}
+		out = append(out, bagID)
+	}
+	return uniqueStrings(out)
+}
+
+func reusableFailedInputBagIDsForRepair(owner core.PipelineInstance, frame core.ExceptionFrame) []string {
+	replaced := make(map[string]bool)
+	for _, binding := range frame.SelectedHandlers {
+		if binding.OwnerInstanceID != "" && binding.OwnerInstanceID != owner.ID {
+			continue
+		}
+		for _, replace := range binding.Replaces {
+			if strings.TrimSpace(replace.BagID) != "" {
+				replaced[replace.BagID] = true
+			}
+			if strings.TrimSpace(replace.Name) != "" {
+				replaced[replace.Name] = true
+			}
+		}
+	}
+	out := make([]string, 0)
+	for _, failed := range frame.FailedInputBags {
+		if strings.TrimSpace(failed.BagID) == "" {
+			continue
+		}
+		if replaced[failed.BagID] || replaced[failed.Name] {
+			continue
+		}
+		out = append(out, failed.BagID)
+	}
+	return uniqueStrings(out)
+}
+
+func bagIDsForInstanceInputs(instance core.PipelineInstance) []string {
+	out := make([]string, 0, len(instance.InputBagIDs))
+	for _, bagID := range instance.InputBagIDs {
+		out = append(out, bagID)
+	}
+	for _, bagIDs := range instance.InputBagIDLists {
+		out = append(out, bagIDs...)
+	}
+	return uniqueStrings(out)
+}
+
+func bagIDsForInstanceOutputs(instance core.PipelineInstance) []string {
+	out := make([]string, 0, len(instance.OutputBagIDs))
+	for _, bagID := range instance.OutputBagIDs {
+		out = append(out, bagID)
+	}
+	for _, bagIDs := range instance.OutputBagIDLists {
+		out = append(out, bagIDs...)
+	}
+	return uniqueStrings(out)
+}
+
+func snapshotsProducingBags(ctx context.Context, repository doujiagit.Repository, bagIDs []string) []string {
+	out := make([]string, 0)
+	for _, bagID := range bagIDs {
+		snapshotID, err := repository.ProducerOfBag(ctx, bagID)
+		if err != nil {
+			continue
+		}
+		out = append(out, snapshotID)
+	}
+	return doujiagit.NormalizeIDs(out)
+}
+
+func snapshotIDForTask(ctx context.Context, repository doujiagit.Repository, runID core.RunID, taskID core.TaskID) string {
+	snapshots, err := repository.ListSnapshotsByRun(ctx, runID)
+	if err != nil {
+		return ""
+	}
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if snapshots[i].TaskID == taskID {
+			return snapshots[i].SnapshotID
+		}
+	}
+	return ""
+}
+
+func (s *Service) activeRefMembers(ctx context.Context, runID core.RunID) ([]activeRefMember, error) {
+	repository, err := s.requireDoujiaGit()
+	if err != nil {
+		return nil, err
+	}
+	ref, err := repository.GetRef(ctx, runID, doujiagit.DefaultRefName)
+	if err != nil {
+		return nil, nil
+	}
+	snapshotIDs := doujiagit.NormalizeIDs(ref.FrontierMemberSnapshotIDs)
+	if len(snapshotIDs) == 0 && strings.TrimSpace(ref.FrontierSnapshotID) != "" {
+		frontier, err := repository.GetFrontierSnapshot(ctx, ref.FrontierSnapshotID)
+		if err != nil {
+			return nil, err
+		}
+		snapshotIDs = doujiagit.NormalizeIDs(frontier.TaskSnapshotIDs)
+	}
+	members := make([]activeRefMember, 0, len(snapshotIDs))
+	for _, snapshotID := range snapshotIDs {
+		snapshot, err := repository.GetSnapshot(ctx, snapshotID)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, activeRefMember{Ref: ref, Snapshot: snapshot})
+	}
+	return members, nil
+}
+
+func (s *Service) advanceActiveRef(ctx context.Context, run core.PipelineRun) error {
+	members, err := s.activeRefMembers(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	for _, member := range members {
+		consumed, err := s.snapshotAlreadyConsumed(ctx, run.ID, member.Ref.RefName, member.Snapshot.SnapshotID)
+		if err != nil {
+			return err
+		}
+		if consumed {
+			continue
+		}
+		result, err := s.advanceActiveRefMember(ctx, run, member)
+		if err != nil {
+			return err
+		}
+		if result.Consumed {
+			if err := s.recordSnapshotProcessingDecision(ctx, member, result); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) advanceByFacts(ctx context.Context, run core.PipelineRun) error {
+	if _, err := s.requireDoujiaGit(); err != nil {
+		return err
+	}
+	if err := s.advanceActiveRef(ctx, run); err != nil {
+		return err
+	}
+	latest, err := s.runs.Get(ctx, run.ID)
+	if err != nil {
+		latest = run
+	}
+	projection, err := s.buildRunFactProjection(ctx, latest)
+	if err != nil {
+		return err
+	}
+	return s.syncLegacyStatusProjection(ctx, latest, projection)
+}
+
+func (s *Service) advanceActiveRefMember(ctx context.Context, run core.PipelineRun, member activeRefMember) (activeRefAdvanceResult, error) {
+	snapshot := member.Snapshot
+	if snapshot.Result != core.TaskResultCodeOK {
+		return activeRefAdvanceResult{
+			Consumed:     true,
+			Status:       doujiagit.SnapshotProcessingStatusTerminal,
+			DecisionKind: doujiagit.RefMoveModeAdvance,
+			Reason:       fmt.Sprintf("snapshot result %s is terminal for phase 3 active-ref consumption", snapshot.Result),
+		}, nil
+	}
+	if snapshot.PipelineInstanceID != "" {
+		return s.advancePipelineInstanceActiveRefMember(ctx, run, member)
+	}
+	spec, err := s.pipelines.Get(ctx, run.PipelineID)
+	if err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	nextStage, ok := findNextStage(spec, stageIDForSnapshot(snapshot))
+	if !ok {
+		fact := feedbackFactContext{
+			SnapshotID:         snapshot.SnapshotID,
+			SnapshotVersionID:  snapshot.SnapshotVersionID,
+			FrontierSnapshotID: member.Ref.FrontierSnapshotID,
+			RefName:            member.Ref.RefName,
+			OutputBagIDs:       append([]string(nil), snapshot.OutputBagIDs...),
+			Committed:          true,
+		}
+		if handled, err := s.advanceRootPipelineFromLegacyTerminalSnapshot(ctx, run, snapshot, fact); err != nil || handled {
+			if err != nil {
+				return activeRefAdvanceResult{}, err
+			}
+			return activeRefAdvanceResult{
+				Consumed:        true,
+				Status:          doujiagit.SnapshotProcessingStatusAdvanced,
+				DecisionKind:    doujiagit.RefMoveModeAdvance,
+				ContinuationID:  string(stageIDForSnapshot(snapshot)),
+				ProducedTaskIDs: nil,
+				Replacement: frontierReplacement{
+					RunID:                  run.ID,
+					RefName:                member.Ref.RefName,
+					FromFrontierSnapshotID: member.Ref.FrontierSnapshotID,
+					ConsumedSnapshotIDs:    []string{snapshot.SnapshotID},
+					Mode:                   doujiagit.RefMoveModeAdvance,
+				},
+				ReplacementResult: frontierReplacementResult{ToFrontierSnapshotID: member.Ref.FrontierSnapshotID},
+			}, nil
+		}
+		if err := s.markRunAwaitingAcceptance(ctx, run, snapshot.TaskID, "root_pipeline_complete"); err != nil {
+			return activeRefAdvanceResult{}, err
+		}
+		return activeRefAdvanceResult{
+			Consumed:       true,
+			Status:         doujiagit.SnapshotProcessingStatusAdvanced,
+			DecisionKind:   doujiagit.RefMoveModeAdvance,
+			ContinuationID: "run_awaiting_acceptance",
+			Reason:         "root pipeline complete",
+		}, nil
+	}
+	nextTask := core.Task{
+		ID:                core.TaskID(nextStage.ID),
+		RunID:             run.ID,
+		StageID:           nextStage.ID,
+		AgentRole:         nextStage.AgentRole,
+		AgentID:           nextStage.AgentAlias,
+		Op:                nextStage.Op,
+		Status:            core.TaskStatusPending,
+		InputArtifactRefs: nil,
+		CreatedAt:         time.Now().UTC(),
+		UpdatedAt:         time.Now().UTC(),
+	}
+	if len(nextStage.DependsOnIDs) > 0 {
+		nextTask.DependsOnIDs = stageIDsToTaskIDs(nextStage.DependsOnIDs)
+	}
+	nextTask.InputBags = bagBindingsFromSnapshotOutput(nextStage, snapshot)
+	nextTask.InputBagIDs = snapshot.OutputBagIDs
+	fact := feedbackFactContext{
+		SnapshotID:         snapshot.SnapshotID,
+		SnapshotVersionID:  snapshot.SnapshotVersionID,
+		FrontierSnapshotID: member.Ref.FrontierSnapshotID,
+		RefName:            member.Ref.RefName,
+		OutputBagIDs:       append([]string(nil), snapshot.OutputBagIDs...),
+		Committed:          true,
+	}
+	if err := s.dispatchTaskWithFact(ctx, run, nextTask, nextStage.Op, nil, fact); err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	return activeRefAdvanceResult{
+		Consumed:        true,
+		Status:          doujiagit.SnapshotProcessingStatusAdvanced,
+		DecisionKind:    doujiagit.RefMoveModeAdvance,
+		ContinuationID:  string(nextStage.ID),
+		ProducedTaskIDs: []string{string(nextTask.ID)},
+		Replacement: frontierReplacement{
+			RunID:                  run.ID,
+			RefName:                member.Ref.RefName,
+			FromFrontierSnapshotID: member.Ref.FrontierSnapshotID,
+			ConsumedSnapshotIDs:    []string{snapshot.SnapshotID},
+			Mode:                   doujiagit.RefMoveModeAdvance,
+		},
+		ReplacementResult: frontierReplacementResult{ToFrontierSnapshotID: member.Ref.FrontierSnapshotID},
+	}, nil
+}
+
+func (s *Service) advanceRootPipelineFromLegacyTerminalSnapshot(ctx context.Context, run core.PipelineRun, snapshot doujiagit.TaskSnapshot, fact feedbackFactContext) (bool, error) {
+	if s.instances == nil || s.definitions == nil || snapshot.PipelineInstanceID != "" {
+		return false, nil
+	}
+	instance, err := s.ensureRootPipelineInstance(ctx, run)
+	if err != nil {
+		return false, err
+	}
+	def, err := s.definitions.GetDef(ctx, instance.PipelineID)
+	if err != nil {
+		return false, nil
+	}
+	transition, ok := findTransition(def, string(stageIDForSnapshot(snapshot)))
+	if !ok {
+		return false, nil
+	}
+	outputBagLists, err := outputBagIDListsFromSnapshotForInstance(transition, snapshot.Result, snapshot.OutputBagIDs, instance, snapshot)
+	if err != nil {
+		return false, err
+	}
+	if len(outputBagLists) > 0 {
+		instance = mergeOutputBagLists(instance, outputBagLists)
+	} else {
+		instance = mergeOutputBags(instance, outputBagIDsForTransition(transition, snapshot.Result, snapshot.OutputBagIDs))
+	}
+	instance = mirrorOutputBagsToInputBags(instance)
+	instance.UpdatedAt = time.Now().UTC()
+	if err := s.instances.Update(ctx, instance); err != nil {
+		return false, err
+	}
+	return true, s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, transition.ToState, snapshot.Result, fact)
+}
+
+func mirrorOutputBagsToInputBags(instance core.PipelineInstance) core.PipelineInstance {
+	if len(instance.OutputBagIDs) == 0 && len(instance.OutputBagIDLists) == 0 {
+		return instance
+	}
+	if instance.InputBagIDs == nil {
+		instance.InputBagIDs = make(map[string]string, len(instance.OutputBagIDs))
+	}
+	if instance.InputBagIDLists == nil {
+		instance.InputBagIDLists = make(map[string][]string, len(instance.OutputBagIDLists))
+	}
+	for key, value := range instance.OutputBagIDs {
+		if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+			continue
+		}
+		instance.InputBagIDs[key] = value
+	}
+	for key, values := range instance.OutputBagIDLists {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		for _, value := range values {
+			instance.InputBagIDLists[key] = appendUniqueString(instance.InputBagIDLists[key], value)
+		}
+	}
+	return instance
+}
+
+func (s *Service) advancePipelineInstanceActiveRefMember(ctx context.Context, run core.PipelineRun, member activeRefMember) (activeRefAdvanceResult, error) {
+	snapshot := member.Snapshot
+	if s.instances == nil || s.definitions == nil {
+		return activeRefAdvanceResult{}, nil
+	}
+	instance, err := s.instances.Get(ctx, run.ID, snapshot.PipelineInstanceID)
+	if err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	def, err := s.definitions.GetDef(ctx, instance.PipelineID)
+	if err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	transition, ok := findTransition(def, string(snapshot.TransitionID))
+	if !ok {
+		return activeRefAdvanceResult{}, fmt.Errorf("pipeline %q transition %q not found for snapshot %q", def.PipelineID, snapshot.TransitionID, snapshot.SnapshotID)
+	}
+	outputBagLists, err := outputBagIDListsFromSnapshotForInstance(transition, snapshot.Result, snapshot.OutputBagIDs, instance, snapshot)
+	if err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	if len(outputBagLists) > 0 {
+		instance = mergeOutputBagLists(instance, outputBagLists)
+	} else {
+		instance = mergeOutputBags(instance, outputBagIDsForTransition(transition, snapshot.Result, snapshot.OutputBagIDs))
+	}
+	instance.UpdatedAt = time.Now().UTC()
+	if err := s.instances.Update(ctx, instance); err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	beforeTasks, err := s.tasks.ListByRun(ctx, run.ID)
+	if err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	beforeTaskIDs := taskIDSet(beforeTasks)
+	fact := feedbackFactContext{
+		SnapshotID:         snapshot.SnapshotID,
+		SnapshotVersionID:  snapshot.SnapshotVersionID,
+		FrontierSnapshotID: member.Ref.FrontierSnapshotID,
+		RefName:            member.Ref.RefName,
+		OutputBagIDs:       append([]string(nil), snapshot.OutputBagIDs...),
+		Committed:          true,
+	}
+	if err := s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, transition.ToState, snapshot.Result, fact); err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	afterTasks, err := s.tasks.ListByRun(ctx, run.ID)
+	if err != nil {
+		return activeRefAdvanceResult{}, err
+	}
+	return activeRefAdvanceResult{
+		Consumed:        true,
+		Status:          doujiagit.SnapshotProcessingStatusAdvanced,
+		DecisionKind:    doujiagit.RefMoveModeAdvance,
+		ContinuationID:  string(transition.ToState),
+		ProducedTaskIDs: producedTaskIDsSince(beforeTaskIDs, afterTasks),
+		Replacement: frontierReplacement{
+			RunID:                  run.ID,
+			RefName:                member.Ref.RefName,
+			FromFrontierSnapshotID: member.Ref.FrontierSnapshotID,
+			ConsumedSnapshotIDs:    []string{snapshot.SnapshotID},
+			Mode:                   doujiagit.RefMoveModeAdvance,
+		},
+		ReplacementResult: frontierReplacementResult{ToFrontierSnapshotID: member.Ref.FrontierSnapshotID},
+	}, nil
+}
+
+func bagBindingsFromSnapshotOutput(nextStage pipeline.StageSpec, snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
+	if len(snapshot.OutputBagIDs) == 0 {
+		return nil
+	}
+	if bindings := outputBagBindingsFromSnapshotRuntime(snapshot); len(bindings) > 0 {
+		return bindings
+	}
+	bindings := make([]core.BagBindingRef, 0, len(snapshot.OutputBagIDs))
+	for i, bagID := range snapshot.OutputBagIDs {
+		name := ""
+		if i < len(nextStage.InputBags) {
+			name = nextStage.InputBags[i].Name
+		}
+		bindings = append(bindings, core.BagBindingRef{Name: name, BagID: bagID})
+	}
+	return bindings
+}
+
+func outputBagBindingsFromSnapshotRuntime(snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
+	if strings.TrimSpace(snapshot.RuntimeContextJSON) == "" {
+		return nil
+	}
+	var runtimeContext taskSnapshotRuntimeContext
+	if err := json.Unmarshal([]byte(snapshot.RuntimeContextJSON), &runtimeContext); err != nil {
+		return nil
+	}
+	if len(runtimeContext.OutputBags) == 0 {
+		return nil
+	}
+	out := make([]core.BagBindingRef, 0, len(runtimeContext.OutputBags))
+	for _, binding := range runtimeContext.OutputBags {
+		name := strings.TrimSpace(binding.Name)
+		bagID := strings.TrimSpace(binding.BagID)
+		if name == "" || bagID == "" {
+			continue
+		}
+		out = append(out, core.BagBindingRef{
+			Name:    name,
+			BagID:   bagID,
+			Indexes: cloneControlStringMap(binding.Indexes),
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func outputBagIDListsFromSnapshotForInstance(transition pipeline.TransitionSpec, result core.TaskResultCode, outputBagIDs []string, instance core.PipelineInstance, snapshot doujiagit.TaskSnapshot) (map[string][]string, error) {
+	bindings := outputBagBindingsFromSnapshotRuntime(snapshot)
+	if len(bindings) == 0 {
+		return nil, nil
+	}
+	commit := &core.CommitReceipt{Result: result}
+	commit.ProducedBags = make([]core.CommittedBagDef, 0, len(bindings))
+	for _, binding := range bindings {
+		name := strings.TrimSpace(binding.Name)
+		if name == "" {
+			continue
+		}
+		commit.ProducedBags = append(commit.ProducedBags, core.CommittedBagDef{
+			Name:    name,
+			Indexes: cloneControlStringMap(binding.Indexes),
+		})
+	}
+	if len(commit.ProducedBags) == 0 {
+		return nil, nil
+	}
+	return outputBagIDListsFromCommitForInstance(transition, result, commit, outputBagIDs, instance)
+}
+
+func newFrontierMembers(current []string, consumed []string, produced []string) []string {
+	consumedSet := make(map[string]bool)
+	for _, id := range doujiagit.NormalizeIDs(consumed) {
+		consumedSet[id] = true
+	}
+	out := make([]string, 0, len(current)+len(produced))
+	seen := make(map[string]bool)
+	for _, id := range doujiagit.NormalizeIDs(current) {
+		if consumedSet[id] || seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	for _, id := range doujiagit.NormalizeIDs(produced) {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, id)
+	}
+	return out
+}
+
+func (s *Service) replaceActiveFrontier(ctx context.Context, replacement frontierReplacement) (frontierReplacementResult, error) {
+	repository, err := s.requireDoujiaGit()
+	if err != nil {
+		return frontierReplacementResult{}, err
+	}
+	replacement.RefName = strings.TrimSpace(replacement.RefName)
+	if replacement.RefName == "" {
+		replacement.RefName = doujiagit.DefaultRefName
+	}
+	if strings.TrimSpace(replacement.Mode) == "" {
+		replacement.Mode = doujiagit.RefMoveModeAdvance
+	}
+	current, err := repository.GetRef(ctx, replacement.RunID, replacement.RefName)
+	if err != nil {
+		return frontierReplacementResult{}, err
+	}
+	if replacement.FromFrontierSnapshotID == "" {
+		replacement.FromFrontierSnapshotID = current.FrontierSnapshotID
+	}
+	if err := s.validateFrontierReplacement(ctx, current, replacement); err != nil {
+		return frontierReplacementResult{}, err
+	}
+	nextMembers := newFrontierMembers(current.FrontierMemberSnapshotIDs, replacement.ConsumedSnapshotIDs, replacement.ProducedSnapshotIDs)
+	now := s.uniqueTimestamp()
+	parentFrontiers := []string(nil)
+	if strings.TrimSpace(current.FrontierSnapshotID) != "" {
+		parentFrontiers = []string{current.FrontierSnapshotID}
+	}
+	frontierID := doujiagit.StableFrontierSnapshotID(replacement.RunID, nextMembers, parentFrontiers, now)
+	if err := repository.CreateFrontierSnapshot(ctx, doujiagit.FrontierSnapshot{
+		FrontierSnapshotID:        frontierID,
+		RunID:                     replacement.RunID,
+		ParentFrontierSnapshotIDs: parentFrontiers,
+		TaskSnapshotIDs:           nextMembers,
+		CreatedByMode:             replacement.Mode,
+		CreatedAt:                 now,
+	}); err != nil {
+		return frontierReplacementResult{}, err
+	}
+	_, _, err = repository.MoveRef(ctx, doujiagit.MoveRefRequest{
+		Ref: doujiagit.Ref{
+			RefName:                   replacement.RefName,
+			RunID:                     replacement.RunID,
+			FrontierSnapshotID:        frontierID,
+			FrontierMemberSnapshotIDs: nextMembers,
+			UpdatedAt:                 now,
+		},
+		ExpectedFrontierSnapshotID: current.FrontierSnapshotID,
+		Event: doujiagit.RefMoveEvent{
+			EventID:                 doujiagit.StableRefMoveEventID(replacement.RunID, replacement.RefName, parentFrontiers, []string{frontierID}, replacement.Mode, now),
+			RunID:                   replacement.RunID,
+			RefName:                 replacement.RefName,
+			FromFrontierSnapshotIDs: parentFrontiers,
+			ToFrontierSnapshotIDs:   []string{frontierID},
+			Mode:                    replacement.Mode,
+			Reason:                  replacement.Reason,
+			CreatedAt:               now,
+		},
+	})
+	if err != nil {
+		return frontierReplacementResult{}, err
+	}
+	return frontierReplacementResult{
+		ToFrontierSnapshotID: frontierID,
+		NewMemberSnapshotIDs: nextMembers,
+	}, nil
+}
+
+func (s *Service) validateFrontierReplacement(ctx context.Context, current doujiagit.Ref, replacement frontierReplacement) error {
+	currentMembers := make(map[string]bool)
+	for _, id := range doujiagit.NormalizeIDs(current.FrontierMemberSnapshotIDs) {
+		currentMembers[id] = true
+	}
+	consumed := doujiagit.NormalizeIDs(replacement.ConsumedSnapshotIDs)
+	produced := doujiagit.NormalizeIDs(replacement.ProducedSnapshotIDs)
+	if len(consumed) == 0 && len(produced) == 0 {
+		return fmt.Errorf("frontier replacement must consume or produce at least one snapshot")
+	}
+	for _, id := range consumed {
+		if !currentMembers[id] {
+			return fmt.Errorf("frontier replacement consumed snapshot %q is not in active ref", id)
+		}
+	}
+	for _, id := range produced {
+		if _, err := s.doujiaGit.GetSnapshot(ctx, id); err != nil {
+			return fmt.Errorf("frontier replacement produced snapshot %q is missing: %w", id, err)
+		}
+	}
+	if replacement.Mode != doujiagit.RefMoveModeRecover {
+		seenLogical := make(map[string]string)
+		for _, id := range newFrontierMembers(current.FrontierMemberSnapshotIDs, consumed, produced) {
+			snapshot, err := s.doujiaGit.GetSnapshot(ctx, id)
+			if err != nil {
+				return fmt.Errorf("frontier replacement member snapshot %q is missing: %w", id, err)
+			}
+			logicalID := strings.TrimSpace(snapshot.LogicalSnapshotID)
+			if logicalID == "" {
+				continue
+			}
+			if existing := seenLogical[logicalID]; existing != "" && existing != id {
+				return fmt.Errorf("frontier replacement would keep multiple versions of logical snapshot %q: %s and %s", logicalID, existing, id)
+			}
+			seenLogical[logicalID] = id
+		}
+	}
+	return nil
+}
+
+func taskIDSet(tasks []core.Task) map[core.TaskID]bool {
+	out := make(map[core.TaskID]bool, len(tasks))
+	for _, task := range tasks {
+		out[task.ID] = true
+	}
+	return out
+}
+
+func producedTaskIDsSince(before map[core.TaskID]bool, after []core.Task) []string {
+	out := make([]string, 0)
+	for _, task := range after {
+		if before[task.ID] {
+			continue
+		}
+		out = append(out, string(task.ID))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s *Service) recordSnapshotProcessingDecision(ctx context.Context, member activeRefMember, result activeRefAdvanceResult) error {
+	if !result.Consumed {
+		return nil
+	}
+	repository, err := s.requireDoujiaGit()
+	if err != nil {
+		return err
+	}
+	now := s.uniqueTimestamp()
+	return repository.CreateSnapshotProcessingDecision(ctx, doujiagit.SnapshotProcessingDecision{
+		RunID:                       member.Snapshot.RunID,
+		RefName:                     member.Ref.RefName,
+		SnapshotID:                  member.Snapshot.SnapshotID,
+		SnapshotVersionID:           member.Snapshot.SnapshotVersionID,
+		Status:                      result.Status,
+		DecisionKind:                decisionKindForSnapshotProcessing(member.Snapshot, result.DecisionKind),
+		ContinuationID:              result.ContinuationID,
+		Reason:                      result.Reason,
+		ProducedTaskIDs:             result.ProducedTaskIDs,
+		ProducedPipelineInstanceIDs: result.ProducedPipelineInstanceIDs,
+		ConsumedSnapshotIDs:         result.Replacement.ConsumedSnapshotIDs,
+		ProducedSnapshotIDs:         result.Replacement.ProducedSnapshotIDs,
+		FromFrontierSnapshotID:      result.Replacement.FromFrontierSnapshotID,
+		ToFrontierSnapshotID:        result.ReplacementResult.ToFrontierSnapshotID,
+		RecoverTargetSnapshotIDs:    member.Snapshot.RecoverTargetSnapshotIDs,
+		ReusableSnapshotIDs:         member.Snapshot.ReusableSnapshotIDs,
+		RecoverAnchorSnapshotIDs:    member.Snapshot.RecoverAnchorSnapshotIDs,
+		FailedSnapshotID:            member.Snapshot.RecoverFromSnapshotID,
+		PreviousAttemptSnapshotIDs:  member.Snapshot.PreviousAttemptSnapshotIDs,
+		FailureReportBagIDs:         member.Snapshot.FailureReportBagIDs,
+		PreviousOutputBagIDs:        member.Snapshot.PreviousOutputBagIDs,
+		RepairTargetTransitionID:    member.Snapshot.RepairTargetTransitionID,
+		RepairTargetTaskID:          member.Snapshot.RepairTargetTaskID,
+		CreatedAt:                   now,
+		UpdatedAt:                   now,
+	})
+}
+
+func decisionKindForSnapshotProcessing(snapshot doujiagit.TaskSnapshot, fallback string) string {
+	if strings.TrimSpace(snapshot.BranchKind) != "" {
+		return strings.TrimSpace(snapshot.BranchKind)
+	}
+	return fallback
+}
+
+func (s *Service) snapshotAlreadyConsumed(ctx context.Context, runID core.RunID, refName string, snapshotID string) (bool, error) {
+	repository, err := s.requireDoujiaGit()
+	if err != nil {
+		return false, err
+	}
+	decision, err := repository.GetSnapshotProcessingDecision(ctx, runID, refName, snapshotID)
+	if err != nil {
+		return false, nil
+	}
+	switch decision.Status {
+	case doujiagit.SnapshotProcessingStatusAdvanced, doujiagit.SnapshotProcessingStatusTerminal:
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (s *Service) consumedSnapshotIDsForFeedback(ctx context.Context, inputBagIDs []string) []string {
+	if s.doujiaGit == nil {
+		return nil
+	}
+	out := make([]string, 0)
+	for _, bagID := range inputBagIDs {
+		snapshotID, err := s.doujiaGit.ProducerOfBag(ctx, bagID)
+		if err != nil {
+			continue
+		}
+		out = append(out, snapshotID)
+	}
+	return doujiagit.NormalizeIDs(out)
+}
+
+func (s *Service) moveDoujiaGitRefWithRetry(ctx context.Context, task core.Task, snapshotID string, refName string, now time.Time, moveMode string, consumedSnapshotIDs []string) (string, error) {
+	if strings.TrimSpace(moveMode) == "" {
+		moveMode = doujiagit.RefMoveModeAdvance
+	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		var parentFrontierSnapshotIDs []string
-		if currentRef, err := s.doujiaGit.GetRef(ctx, task.RunID, refName); err == nil && strings.TrimSpace(currentRef.FrontierSnapshotID) != "" {
-			parentFrontierSnapshotIDs = []string{currentRef.FrontierSnapshotID}
+		currentMembers := []string(nil)
+		if currentRef, err := s.doujiaGit.GetRef(ctx, task.RunID, refName); err == nil {
+			currentMembers = append([]string(nil), currentRef.FrontierMemberSnapshotIDs...)
+			if strings.TrimSpace(currentRef.FrontierSnapshotID) != "" {
+				parentFrontierSnapshotIDs = []string{currentRef.FrontierSnapshotID}
+			}
 		}
+		nextMembers := newFrontierMembers(currentMembers, consumedSnapshotIDs, []string{snapshotID})
 		frontierTime := now.Add(time.Duration(attempt) * time.Nanosecond)
-		frontierSnapshotID := doujiagit.StableFrontierSnapshotID(task.RunID, []string{snapshotID}, parentFrontierSnapshotIDs, frontierTime)
+		frontierSnapshotID := doujiagit.StableFrontierSnapshotID(task.RunID, nextMembers, parentFrontierSnapshotIDs, frontierTime)
 		refMoveEventID := doujiagit.StableRefMoveEventID(
 			task.RunID,
 			refName,
@@ -652,20 +1650,20 @@ func (s *Service) moveDoujiaGitRefWithRetry(ctx context.Context, task core.Task,
 			FrontierSnapshotID:        frontierSnapshotID,
 			RunID:                     task.RunID,
 			ParentFrontierSnapshotIDs: parentFrontierSnapshotIDs,
-			TaskSnapshotIDs:           []string{snapshotID},
-			CreatedByMode:             doujiagit.RefMoveModeAdvance,
+			TaskSnapshotIDs:           nextMembers,
+			CreatedByMode:             moveMode,
 			CreatedByEventID:          refMoveEventID,
 			CreatedAt:                 frontierTime,
 		}); err != nil {
-			return err
+			return "", err
 		}
 		_, _, err := s.doujiaGit.MoveRef(ctx, doujiagit.MoveRefRequest{
 			Ref: doujiagit.Ref{
-				RefName:             doujiagit.DefaultRefName,
-				RunID:               task.RunID,
-				FrontierSnapshotID:  frontierSnapshotID,
-				FrontierSnapshotIDs: []string{snapshotID},
-				UpdatedAt:           frontierTime,
+				RefName:                   doujiagit.DefaultRefName,
+				RunID:                     task.RunID,
+				FrontierSnapshotID:        frontierSnapshotID,
+				FrontierMemberSnapshotIDs: nextMembers,
+				UpdatedAt:                 frontierTime,
 			},
 			ExpectedFrontierSnapshotID: firstString(parentFrontierSnapshotIDs),
 			Event: doujiagit.RefMoveEvent{
@@ -674,20 +1672,20 @@ func (s *Service) moveDoujiaGitRefWithRetry(ctx context.Context, task core.Task,
 				RefName:                 refName,
 				FromFrontierSnapshotIDs: parentFrontierSnapshotIDs,
 				ToFrontierSnapshotIDs:   []string{frontierSnapshotID},
-				Mode:                    doujiagit.RefMoveModeAdvance,
+				Mode:                    moveMode,
 				Reason:                  fmt.Sprintf("task %s committed", task.ID),
 				CreatedAt:               frontierTime,
 			},
 		})
 		if err == nil {
-			return nil
+			return frontierSnapshotID, nil
 		}
 		lastErr = err
 		if !strings.Contains(err.Error(), "compare-and-swap conflict") {
-			return err
+			return "", err
 		}
 	}
-	return lastErr
+	return "", lastErr
 }
 
 func (s *Service) taskSnapshotRuntimeContextJSON(ctx context.Context, task core.Task, feedback core.TaskMetaData, outputBagIDs []string) (string, error) {
@@ -699,6 +1697,7 @@ func (s *Service) taskSnapshotRuntimeContextJSON(ctx context.Context, task core.
 			AgentID:            task.AgentID,
 			Op:                 task.Op,
 		},
+		OutputBags: inputBagBindingsFromCommit(feedback.Commit, outputBagIDs),
 	}
 	if task.PipelineInstanceID != "" && s.instances != nil {
 		instance, err := s.instances.Get(ctx, task.RunID, task.PipelineInstanceID)
@@ -735,6 +1734,21 @@ func (s *Service) applyTaskSnapshotToInstance(ctx context.Context, instance core
 	}
 	if len(outputBags) > 0 {
 		instance = mergeOutputBags(instance, outputBags)
+		if instance.InputBagIDs == nil {
+			instance.InputBagIDs = make(map[string]string)
+		}
+		if instance.InputBagIDLists == nil {
+			instance.InputBagIDLists = make(map[string][]string)
+		}
+		for key, value := range outputBags {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if key == "" || value == "" {
+				continue
+			}
+			instance.InputBagIDs[key] = value
+			instance.InputBagIDLists[key] = appendUniqueString(instance.InputBagIDLists[key], value)
+		}
 	}
 	if feedback.Result == core.TaskResultCodeOK && transitionReachesDelivery(def, transition) {
 		instance.Status = core.PipelineInstanceStatusCompleted
@@ -852,11 +1866,11 @@ func (s *Service) recordDoujiaGitRecover(ctx context.Context, run core.PipelineR
 	}
 	if _, _, err := s.doujiaGit.MoveRef(ctx, doujiagit.MoveRefRequest{
 		Ref: doujiagit.Ref{
-			RefName:             refName,
-			RunID:               failedTask.RunID,
-			FrontierSnapshotID:  frontierSnapshotID,
-			FrontierSnapshotIDs: taskSnapshotIDs,
-			UpdatedAt:           now,
+			RefName:                   refName,
+			RunID:                     failedTask.RunID,
+			FrontierSnapshotID:        frontierSnapshotID,
+			FrontierMemberSnapshotIDs: taskSnapshotIDs,
+			UpdatedAt:                 now,
 		},
 		ExpectedFrontierSnapshotID: firstString(parentFrontierSnapshotIDs),
 		Event: doujiagit.RefMoveEvent{
@@ -1485,7 +2499,42 @@ func (s *Service) handleDynamicTaskFeedback(ctx context.Context, run core.Pipeli
 	if isGlobalTestTask(task, feedback) {
 		return s.markRunAwaitingAcceptance(ctx, run, task.ID, "global_test_completed")
 	}
-	return s.advanceReadyTasks(ctx, run)
+	return s.dispatchReadyDynamicDependents(ctx, run, task)
+}
+
+func (s *Service) dispatchReadyDynamicDependents(ctx context.Context, run core.PipelineRun, completed core.Task) error {
+	if completed.ParentID == nil {
+		return s.advanceByFacts(ctx, run)
+	}
+	tasks, err := s.tasks.ListByRun(ctx, run.ID)
+	if err != nil {
+		return err
+	}
+	byID := make(map[core.TaskID]core.Task, len(tasks))
+	for _, item := range tasks {
+		byID[item.ID] = item
+	}
+	for _, item := range tasks {
+		if item.ParentID == nil || *item.ParentID != *completed.ParentID || item.Status != core.TaskStatusPending {
+			continue
+		}
+		ready, inputs, err := readyTaskInputs(item, byID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			continue
+		}
+		item.InputBagIDs = readyTaskInputBagIDs(item, byID)
+		op := item.Op
+		if strings.TrimSpace(op) == "" {
+			op = opForTask(item)
+		}
+		if err := s.dispatchTask(ctx, run, item, op, inputs); err != nil {
+			return err
+		}
+	}
+	return s.advanceByFacts(ctx, run)
 }
 
 func isGlobalTestTask(task core.Task, feedback core.TaskMetaData) bool {
@@ -1546,6 +2595,10 @@ func setDynamicTransientRetryCount(task *core.Task, count int) {
 }
 
 func (s *Service) retryDynamicTaskAfterTransientFailure(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData) error {
+	fact, err := s.commitFeedbackFact(ctx, task, feedback, doujiagit.RefMoveModeAdvance)
+	if err != nil {
+		return err
+	}
 	retryCount := dynamicTransientRetryCount(task) + 1
 	setDynamicTransientRetryCount(&task, retryCount)
 	task.Result = feedback.Result
@@ -1561,7 +2614,7 @@ func (s *Service) retryDynamicTaskAfterTransientFailure(ctx context.Context, run
 		"dynamic_task":  true,
 		"transient_err": true,
 	})
-	return s.dispatchTask(ctx, run, task, feedback.Op, artifactRefsToStrings(task.InputArtifactRefs))
+	return s.dispatchTaskWithFact(ctx, run, task, feedback.Op, artifactRefsToStrings(task.InputArtifactRefs), fact)
 }
 
 func findNextStage(spec pipeline.PipelineSpec, current core.StageID) (pipeline.StageSpec, bool) {
@@ -1617,7 +2670,7 @@ func (s *Service) handleChildFeedback(ctx context.Context, run core.PipelineRun,
 		if err := s.tasks.Update(ctx, parent); err != nil {
 			return err
 		}
-		return s.advanceReadyTasks(ctx, run)
+		return s.dispatchReadyDynamicDependents(ctx, run, parent)
 	}
 	if feedback.Op == core.TaskOpDebug && parent.AgentRole == core.AgentRoleTester && opForTask(parent) == core.TaskOpTestCode {
 		parentInputs := mergeArtifactLists(
@@ -1648,6 +2701,10 @@ func (s *Service) handleChildFeedback(ctx context.Context, run core.PipelineRun,
 }
 
 func (s *Service) createChildTask(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData) error {
+	return s.createChildTaskWithFact(ctx, run, task, feedback, feedbackFactContext{})
+}
+
+func (s *Service) createChildTaskWithFact(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData, fact feedbackFactContext) error {
 	upstreamTaskID, ok := primaryTaskDependency(task)
 	if !ok {
 		return s.failRun(ctx, run, task.ID)
@@ -1688,10 +2745,14 @@ func (s *Service) createChildTask(ctx context.Context, run core.PipelineRun, tas
 		CreatedAt:         time.Now().UTC(),
 		UpdatedAt:         time.Now().UTC(),
 	}
-	return s.dispatchTask(ctx, run, childTask, childOp, inputArtifacts)
+	return s.dispatchTaskWithFact(ctx, run, childTask, childOp, inputArtifacts, fact)
 }
 
 func (s *Service) createResplitTask(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData, controlErr error) error {
+	return s.createResplitTaskWithFact(ctx, run, task, feedback, controlErr, feedbackFactContext{})
+}
+
+func (s *Service) createResplitTaskWithFact(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData, controlErr error, fact feedbackFactContext) error {
 	childID, err := s.nextChildTaskID(ctx, run.ID, task.ID)
 	if err != nil {
 		return err
@@ -1714,7 +2775,7 @@ func (s *Service) createResplitTask(ctx context.Context, run core.PipelineRun, t
 	if s.logger != nil {
 		_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("control invalid on task=%s: %v", task.ID, controlErr))
 	}
-	return s.dispatchTask(ctx, run, childTask, core.TaskOpResplitModule, inputArtifacts)
+	return s.dispatchTaskWithFact(ctx, run, childTask, core.TaskOpResplitModule, inputArtifacts, fact)
 }
 
 func (s *Service) createDynamicDebugTask(ctx context.Context, run core.PipelineRun, task core.Task, feedback core.TaskMetaData) error {
@@ -1803,7 +2864,15 @@ func (s *Service) expandControlTasks(ctx context.Context, run core.PipelineRun, 
 			_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("pending task created: task=%s op=%s deps=%s", task.ID, opForTask(task), formatTaskDeps(taskDependencies(task))))
 		}
 	}
-	return s.advanceReadyTasks(ctx, run)
+	for _, task := range plans {
+		if len(task.DependsOnIDs) != 1 || task.DependsOnIDs[0] != sourceTask.ID {
+			continue
+		}
+		if err := s.dispatchTask(ctx, run, task, task.Op, artifactRefsToStrings(task.InputArtifactRefs)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Service) expandStartPipelineControls(ctx context.Context, run core.PipelineRun, sourceTask core.Task, feedback core.TaskMetaData) error {
@@ -1903,10 +2972,10 @@ func (s *Service) enterPipelineState(ctx context.Context, run core.PipelineRun, 
 		return fmt.Errorf("pipeline %q state %q not found", def.PipelineID, stateID)
 	}
 	if state.Kind == "aggregate" {
-		if !aggregateStateReady(state, &instance) {
+		if !aggregateStateReady(state, &instance, states) {
 			return nil
 		}
-		if err := s.materializeAggregateBags(ctx, run, instance, state); err != nil {
+		if err := s.materializeAggregateBags(ctx, run, instance, state, states); err != nil {
 			return err
 		}
 		instance.UpdatedAt = time.Now().UTC()
@@ -1932,6 +3001,10 @@ func (s *Service) enterPipelineState(ctx context.Context, run core.PipelineRun, 
 }
 
 func (s *Service) advancePipelineInstanceAfterTransition(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, def pipeline.PipelineDefSpec, stateID string, result core.TaskResultCode) error {
+	return s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, stateID, result, feedbackFactContext{})
+}
+
+func (s *Service) advancePipelineInstanceAfterTransitionWithFact(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, def pipeline.PipelineDefSpec, stateID string, result core.TaskResultCode, fact feedbackFactContext) error {
 	states := pipelineStatesByID(def)
 	state, ok := states[stateID]
 	if !ok {
@@ -1943,10 +3016,10 @@ func (s *Service) advancePipelineInstanceAfterTransition(ctx context.Context, ru
 	}
 	instance = applyStateExposes(instance, state)
 	if state.Kind == "aggregate" {
-		if !aggregateStateReady(state, &instance) {
+		if !aggregateStateReady(state, &instance, states) {
 			return nil
 		}
-		if err := s.materializeAggregateBags(ctx, run, instance, state); err != nil {
+		if err := s.materializeAggregateBags(ctx, run, instance, state, states); err != nil {
 			return err
 		}
 		instance.UpdatedAt = time.Now().UTC()
@@ -1954,10 +3027,32 @@ func (s *Service) advancePipelineInstanceAfterTransition(ctx context.Context, ru
 			return err
 		}
 	}
+	if state.Kind != "aggregate" {
+		instance.UpdatedAt = time.Now().UTC()
+		if err := s.instances.Update(ctx, instance); err != nil {
+			return err
+		}
+		if err := s.enterReadyAggregateStates(ctx, run, instance, def); err != nil {
+			return err
+		}
+		latest, err := s.instances.Get(ctx, run.ID, instance.ID)
+		if err != nil {
+			return err
+		}
+		instance = latest
+	}
+	instance = applyStateExposes(instance, state)
+	instance = mirrorOutputBagsToInputBags(instance)
 	if nextCase, ok, err := nextCaseForResult(state, result); err != nil {
 		return err
-	} else if ok && nextCase.Ref != nil && len(nextCase.Ref.ReplaceBags) > 0 {
-		instance = applyReplaceBags(instance, nextCase.Ref.ReplaceBags)
+	} else if ok && nextCase.Ref != nil {
+		replaceBags := nextCase.Ref.ReplaceBags
+		if len(replaceBags) == 0 && strings.TrimSpace(nextCase.Ref.Mode) == doujiagit.RefMoveModeRecover {
+			replaceBags = state.Exposes.Bags
+		}
+		if len(replaceBags) > 0 {
+			instance = applyReplaceBags(instance, replaceBags)
+		}
 		instance.UpdatedAt = time.Now().UTC()
 		if err := s.instances.Update(ctx, instance); err != nil {
 			return err
@@ -1976,7 +3071,7 @@ func (s *Service) advancePipelineInstanceAfterTransition(ctx context.Context, ru
 		if nextState.Proof.Type == "accepted_result" {
 			nextResult = core.TaskResultCode(nextState.Proof.Result)
 		}
-		return s.advancePipelineInstanceAfterTransition(ctx, run, instance, def, nextStateID, nextResult)
+		return s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, nextStateID, nextResult, fact)
 	}
 	nextTransitionIDs, err := nextTransitionIDsForState(state, result)
 	if err != nil {
@@ -1985,7 +3080,7 @@ func (s *Service) advancePipelineInstanceAfterTransition(ctx context.Context, ru
 	if len(nextTransitionIDs) == 0 {
 		return nil
 	}
-	return s.startPipelineTransitions(ctx, run, instance, def, state.ID, nextTransitionIDs)
+	return s.startPipelineTransitionsWithFact(ctx, run, instance, def, state.ID, nextTransitionIDs, fact)
 }
 
 func applyStateExposes(instance core.PipelineInstance, state pipeline.StateSpec) core.PipelineInstance {
@@ -2051,6 +3146,10 @@ func exposedBagIDs(instance core.PipelineInstance, bag pipeline.BagSpec) []strin
 }
 
 func (s *Service) startPipelineTransitions(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, def pipeline.PipelineDefSpec, stateID string, transitionIDs []string) error {
+	return s.startPipelineTransitionsWithFact(ctx, run, instance, def, stateID, transitionIDs, feedbackFactContext{})
+}
+
+func (s *Service) startPipelineTransitionsWithFact(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, def pipeline.PipelineDefSpec, stateID string, transitionIDs []string, fact feedbackFactContext) error {
 	transitions := pipelineTransitionsByID(def)
 	for _, transitionID := range transitionIDs {
 		transition, ok := transitions[transitionID]
@@ -2083,17 +3182,28 @@ func (s *Service) startPipelineTransitions(ctx context.Context, run core.Pipelin
 			if !startTask {
 				continue
 			}
-			if err := s.dispatchTask(ctx, run, task, transition.Op, nil); err != nil {
+			if err := s.dispatchTaskWithFact(ctx, run, task, transition.Op, nil, fact); err != nil {
 				return err
 			}
 		case "call":
+			if transition.Mode == "foreach" {
+				if err := s.startForeachPipelineTransition(ctx, run, instance, def, transition); err != nil {
+					return err
+				}
+				continue
+			}
 			if transition.Mode != "single" {
 				return fmt.Errorf("pipeline %q transition %q call mode %q cannot be started without runtime control yet", def.PipelineID, transition.ID, transition.Mode)
+			}
+			called, err := s.definitions.GetDef(ctx, transition.PipelineID)
+			if err != nil {
+				return err
 			}
 			child, err := buildPipelineInstanceFromSingleCall(run.ID, instance, transition)
 			if err != nil {
 				return err
 			}
+			child = normalizeSingleCallInputBagLists(child, called)
 			if existing, err := s.instances.Get(ctx, run.ID, child.ID); err == nil {
 				if existing.Status == core.PipelineInstanceStatusCreated {
 					if err := s.startPipelineInstance(ctx, run, existing); err != nil {
@@ -2116,7 +3226,7 @@ func (s *Service) startPipelineTransitions(ctx context.Context, run core.Pipelin
 				return err
 			}
 		case "gate":
-			if err := s.advancePipelineInstanceAfterTransition(ctx, run, instance, def, transition.ToState, core.TaskResultCodeOK); err != nil {
+			if err := s.advancePipelineInstanceAfterTransitionWithFact(ctx, run, instance, def, transition.ToState, core.TaskResultCodeOK, fact); err != nil {
 				return err
 			}
 		default:
@@ -2124,6 +3234,78 @@ func (s *Service) startPipelineTransitions(ctx context.Context, run core.Pipelin
 		}
 	}
 	return nil
+}
+
+func (s *Service) startForeachPipelineTransition(ctx context.Context, run core.PipelineRun, parent core.PipelineInstance, def pipeline.PipelineDefSpec, transition pipeline.TransitionSpec) error {
+	if transition.Foreach == nil {
+		return fmt.Errorf("pipeline %q transition %q foreach requires foreach spec", def.PipelineID, transition.ID)
+	}
+	called, err := s.definitions.GetDef(ctx, transition.PipelineID)
+	if err != nil {
+		return err
+	}
+	sourceName := strings.TrimSpace(transition.Foreach.ItemsFrom.Name)
+	if sourceName == "" {
+		sourceName = foreachPrimaryInputBagName(transition)
+	}
+	itemKey := strings.TrimSpace(transition.Foreach.ItemKey)
+	if itemKey == "" {
+		return fmt.Errorf("pipeline %q transition %q foreach.item_key is required", def.PipelineID, transition.ID)
+	}
+	bagIDs := bagIDsForName(parent, sourceName)
+	indexesByBagID := indexedBagIndexesByID(parent, sourceName)
+	started := false
+	for _, bagID := range bagIDs {
+		indexes := indexesByBagID[bagID]
+		itemValue := strings.TrimSpace(indexes[itemKey])
+		if itemValue == "" {
+			continue
+		}
+		child, err := buildPipelineInstanceFromForeachCall(run.ID, parent, transition, called, sourceName, bagID, itemKey, itemValue)
+		if err != nil {
+			return err
+		}
+		if existing, err := s.instances.Get(ctx, run.ID, child.ID); err == nil {
+			if existing.Status == core.PipelineInstanceStatusCreated {
+				if err := s.startPipelineInstance(ctx, run, existing); err != nil {
+					return err
+				}
+			}
+			started = true
+			continue
+		}
+		if err := s.instances.Create(ctx, child); err != nil {
+			return err
+		}
+		s.recordEvent(ctx, run.ID, "", "", "pipeline_instance_created", "pipeline instance created", map[string]any{
+			"instance_id":          child.ID,
+			"pipeline_id":          child.PipelineID,
+			"parent_instance_id":   child.ParentID,
+			"parent_transition_id": child.ParentTransitionID,
+			"instance_key":         child.InstanceKey,
+		})
+		if err := s.startPipelineInstance(ctx, run, child); err != nil {
+			return err
+		}
+		started = true
+	}
+	if !started {
+		return fmt.Errorf("pipeline %q transition %q foreach found no indexed items in bag %q by %q", def.PipelineID, transition.ID, sourceName, itemKey)
+	}
+	return nil
+}
+
+func foreachPrimaryInputBagName(transition pipeline.TransitionSpec) string {
+	if transition.Bindings != nil {
+		for _, binding := range transition.Bindings.InputBags {
+			if values, ok := binding.(map[string]any); ok {
+				if name, ok := stringFromAnyMap(values, "name"); ok {
+					return name
+				}
+			}
+		}
+	}
+	return ""
 }
 
 func (s *Service) enterReadyAggregateStates(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, def pipeline.PipelineDefSpec) error {
@@ -2147,7 +3329,11 @@ func (s *Service) enterReadyAggregateStates(ctx context.Context, run core.Pipeli
 
 func (s *Service) completePipelineInstance(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, def pipeline.PipelineDefSpec) error {
 	if instance.Status == core.PipelineInstanceStatusCompleted {
-		return nil
+		instance.UpdatedAt = time.Now().UTC()
+		if err := s.instances.Update(ctx, instance); err != nil {
+			return err
+		}
+		return s.onPipelineInstanceCompleted(ctx, run, instance)
 	}
 	instance.Status = core.PipelineInstanceStatusCompleted
 	instance.UpdatedAt = time.Now().UTC()
@@ -2194,7 +3380,8 @@ func (s *Service) onPipelineInstanceCompleted(ctx context.Context, run core.Pipe
 	}
 
 	if parent.Status == core.PipelineInstanceStatusCompleted {
-		return nil
+		parent.UpdatedAt = time.Now().UTC()
+		return s.instances.Update(ctx, parent)
 	}
 	if transition.ToState == parentDef.DeliveryState {
 		parent.Status = core.PipelineInstanceStatusCompleted
@@ -2284,10 +3471,10 @@ func (s *Service) markRunAwaitingAcceptance(ctx context.Context, run core.Pipeli
 		_ = s.logger.Log(run.ID, "Orchestrator", "run awaiting acceptance")
 	}
 	s.recordEvent(ctx, run.ID, taskID, "", "run_awaiting_acceptance", "run awaiting acceptance", map[string]any{
-		"task_id":             taskID,
-		"acceptance_task_id":  checkpointTaskID,
+		"task_id":              taskID,
+		"acceptance_task_id":   checkpointTaskID,
 		"current_iteration_no": latest.CurrentIterationNo,
-		"reason":              reason,
+		"reason":               reason,
 	})
 	return nil
 }
@@ -3270,6 +4457,132 @@ func buildPipelineInstanceFromSingleCall(runID core.RunID, parent core.PipelineI
 	}, nil
 }
 
+func normalizeSingleCallInputBagLists(child core.PipelineInstance, called pipeline.PipelineDefSpec) core.PipelineInstance {
+	if len(child.InputBagIDLists) == 0 || len(called.Signature.InputBags) == 0 {
+		return child
+	}
+	signature := make(map[string]pipeline.BagSpec, len(called.Signature.InputBags))
+	for _, bag := range called.Signature.InputBags {
+		name := strings.TrimSpace(bag.Name)
+		if name != "" {
+			signature[name] = bag
+		}
+	}
+	for key, values := range child.InputBagIDLists {
+		name := key
+		if indexedName, _, ok := parseIndexedBagLookupKey(key); ok {
+			name = indexedName
+		}
+		spec, ok := signature[strings.TrimSpace(name)]
+		if !ok || spec.Collection {
+			continue
+		}
+		primary := strings.TrimSpace(child.InputBagIDs[name])
+		if primary == "" {
+			primary = strings.TrimSpace(child.InputBagIDs[key])
+		}
+		switch {
+		case primary != "":
+			child.InputBagIDLists[key] = []string{primary}
+		case len(values) > 0:
+			child.InputBagIDLists[key] = []string{values[0]}
+		}
+	}
+	return child
+}
+
+func buildPipelineInstanceFromForeachCall(runID core.RunID, parent core.PipelineInstance, transition pipeline.TransitionSpec, called pipeline.PipelineDefSpec, sourceName string, bagID string, itemKey string, itemValue string) (core.PipelineInstance, error) {
+	if strings.TrimSpace(string(transition.PipelineID)) == "" {
+		return core.PipelineInstance{}, fmt.Errorf("call transition %q requires pipeline_id", transition.ID)
+	}
+	params, err := resolveForeachParamBindings(parent, transition, itemKey, itemValue)
+	if err != nil {
+		return core.PipelineInstance{}, err
+	}
+	agentBindings, err := resolveAgentBindings(parent, transition)
+	if err != nil {
+		return core.PipelineInstance{}, err
+	}
+	inputBags := foreachInputBagBindings(transition, sourceName, bagID)
+	inputBagLists := singletonBagLists(inputBags)
+	for _, bag := range called.Signature.InputBags {
+		if strings.TrimSpace(bag.Name) == "" || len(bag.IndexedBy) == 0 {
+			continue
+		}
+		if inputBagLists == nil {
+			inputBagLists = make(map[string][]string)
+		}
+		if inputBags == nil {
+			inputBags = make(map[string]string)
+		}
+		indexes := make(map[string]string)
+		for _, key := range bag.IndexedBy {
+			key = strings.TrimSpace(key)
+			if key == itemKey && itemValue != "" {
+				indexes[key] = itemValue
+			}
+		}
+		if len(indexes) > 0 {
+			indexedKey := indexedBagLookupKey(bag.Name, indexes)
+			inputBags[indexedKey] = bagID
+			inputBagLists[indexedKey] = []string{bagID}
+		}
+	}
+	now := time.Now().UTC()
+	parentID := parent.ID
+	return core.PipelineInstance{
+		ID:                 stablePipelineInstanceID(parent.ID, transition.ID, itemValue),
+		RunID:              runID,
+		PipelineID:         transition.PipelineID,
+		ParentID:           &parentID,
+		ParentTransitionID: transition.ID,
+		InstanceKey:        itemValue,
+		Status:             core.PipelineInstanceStatusCreated,
+		Params:             params,
+		AgentBindings:      agentBindings,
+		InputBagIDs:        inputBags,
+		InputBagIDLists:    inputBagLists,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}, nil
+}
+
+func resolveForeachParamBindings(parent core.PipelineInstance, transition pipeline.TransitionSpec, itemKey string, itemValue string) (map[string]string, error) {
+	if transition.Bindings == nil || len(transition.Bindings.Params) == 0 {
+		return map[string]string{itemKey: itemValue}, nil
+	}
+	out := make(map[string]string, len(transition.Bindings.Params))
+	for name, expr := range transition.Bindings.Params {
+		value, err := resolveForeachBindingExpr(parent, expr, itemKey, itemValue)
+		if err != nil {
+			return nil, fmt.Errorf("transition %q bindings.params.%s: %w", transition.ID, name, err)
+		}
+		out[name] = value
+	}
+	if _, ok := out[itemKey]; !ok && strings.TrimSpace(itemKey) != "" {
+		out[itemKey] = itemValue
+	}
+	return out, nil
+}
+
+func foreachInputBagBindings(transition pipeline.TransitionSpec, sourceName string, bagID string) map[string]string {
+	out := make(map[string]string)
+	if transition.Bindings == nil || len(transition.Bindings.InputBags) == 0 {
+		if sourceName != "" {
+			out[sourceName] = bagID
+		}
+		return out
+	}
+	for name := range transition.Bindings.InputBags {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out[name] = bagID
+	}
+	return out
+}
+
 func resolveControlParamBindings(parent core.PipelineInstance, transition pipeline.TransitionSpec, control core.Control) (map[string]string, error) {
 	if transition.Bindings == nil || len(transition.Bindings.Params) == 0 {
 		return cloneControlStringMap(control.Params), nil
@@ -3616,17 +4929,27 @@ func resolveInputBagListBindings(parent core.PipelineInstance, transition pipeli
 			return nil, fmt.Errorf("transition %q bindings.input_bags.%s: %w", transition.ID, name, err)
 		}
 		out[name] = values
-		addIndexedInputBagLists(out, parent, name, values)
+		sourceName := name
+		if typed, ok := binding.(map[string]any); ok {
+			if bagRef := bagRefFromBindingObject(typed); bagRef != "" {
+				sourceName = bagRef
+			}
+		}
+		addIndexedInputBagLists(out, parent, name, sourceName, values)
 	}
 	return out, nil
 }
 
-func addIndexedInputBagLists(out map[string][]string, parent core.PipelineInstance, name string, values []string) {
+func addIndexedInputBagLists(out map[string][]string, parent core.PipelineInstance, name string, sourceName string, values []string) {
 	name = strings.TrimSpace(name)
 	if name == "" || len(values) == 0 {
 		return
 	}
-	indexesByBagID := indexedBagIndexesByID(parent, name)
+	sourceName = strings.TrimSpace(sourceName)
+	if sourceName == "" {
+		sourceName = name
+	}
+	indexesByBagID := indexedBagIndexesByID(parent, sourceName)
 	if len(indexesByBagID) == 0 {
 		return
 	}
@@ -3709,10 +5032,8 @@ func bagIDsForBindingObject(parent core.PipelineInstance, bagRef string, binding
 	bag := pipeline.BagSpec{Name: bagRef}
 	if len(specs) > 0 {
 		bag = specs[0]
-		if strings.TrimSpace(bag.Name) == "" {
-			bag.Name = bagRef
-		}
 	}
+	bag.Name = bagRef
 	if len(bag.IndexedBy) == 0 {
 		if indexedBy := stringSliceFromAnyMap(binding, "indexed_by"); len(indexedBy) > 0 {
 			bag.IndexedBy = indexedBy
@@ -4036,7 +5357,7 @@ func childOutputBagBindings(child core.PipelineInstance, bag pipeline.BagSpec) [
 	return out
 }
 
-func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstance) bool {
+func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstance, states map[string]pipeline.StateSpec) bool {
 	switch state.Proof.Mode {
 	case "join_bags":
 		for _, source := range state.Proof.Sources {
@@ -4051,7 +5372,7 @@ func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstan
 			if strings.TrimSpace(exposed.Name) == "" {
 				continue
 			}
-			ids := aggregateInputBagIDsForExposed(state, *instance, exposed)
+			ids := aggregateInputBagIDsForExposed(state, *instance, exposed, states)
 			if len(ids) == 0 {
 				return false
 			}
@@ -4074,7 +5395,7 @@ func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstan
 		if len(state.Proof.States) > 0 {
 			ids := make([]string, 0, len(state.Proof.States))
 			for _, stateID := range state.Proof.States {
-				stateIDs := uniqueStrings(append(bagIDsForName(*instance, stateID), bagIDsForState(*instance, stateID)...))
+				stateIDs := referencedStateBagIDs(states, *instance, stateID)
 				if len(stateIDs) == 0 {
 					return false
 				}
@@ -4085,7 +5406,7 @@ func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstan
 				if strings.TrimSpace(exposed.Name) == "" {
 					continue
 				}
-				exposedIDs := aggregateInputBagIDsForExposed(state, *instance, exposed)
+				exposedIDs := aggregateInputBagIDsForExposed(state, *instance, exposed, states)
 				if len(exposedIDs) == 0 {
 					return false
 				}
@@ -4109,7 +5430,7 @@ func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstan
 			if strings.TrimSpace(exposed.Name) == "" {
 				continue
 			}
-			ids := aggregateInputBagIDsForExposed(state, *instance, exposed)
+			ids := aggregateInputBagIDsForExposed(state, *instance, exposed, states)
 			if len(ids) == 0 {
 				return false
 			}
@@ -4135,7 +5456,7 @@ func aggregateStateReady(state pipeline.StateSpec, instance *core.PipelineInstan
 	}
 }
 
-func (s *Service) materializeAggregateBags(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, state pipeline.StateSpec) error {
+func (s *Service) materializeAggregateBags(ctx context.Context, run core.PipelineRun, instance core.PipelineInstance, state pipeline.StateSpec, states map[string]pipeline.StateSpec) error {
 	if s == nil || s.doujiaGit == nil || len(state.Exposes.Bags) == 0 {
 		return nil
 	}
@@ -4147,7 +5468,7 @@ func (s *Service) materializeAggregateBags(ctx context.Context, run core.Pipelin
 		if _, err := s.doujiaGit.GetBag(ctx, bagID); err == nil {
 			continue
 		}
-		sourceIDs := aggregateInputBagIDsForExposed(state, instance, exposed)
+		sourceIDs := aggregateInputBagIDsForExposed(state, instance, exposed, states)
 		versionIDs := make([]string, 0)
 		for _, sourceID := range sourceIDs {
 			sourceID = strings.TrimSpace(sourceID)
@@ -4181,33 +5502,122 @@ func shouldSynthesizeAggregateBag(bag pipeline.BagSpec) bool {
 	return value == "bag" || value == "join_bags" || value == "true"
 }
 
-func aggregateInputBagIDs(state pipeline.StateSpec, instance core.PipelineInstance) []string {
+func aggregateInputBagIDs(state pipeline.StateSpec, instance core.PipelineInstance, states map[string]pipeline.StateSpec) []string {
 	out := make([]string, 0)
 	for _, source := range state.Proof.Sources {
 		out = append(out, bagIDsForName(instance, source.Name)...)
 	}
 	for _, stateID := range state.Proof.States {
-		out = append(out, bagIDsForName(instance, stateID)...)
+		out = append(out, referencedStateBagIDs(states, instance, stateID)...)
 	}
-	if len(out) == 0 {
-		for _, exposed := range state.Exposes.Bags {
-			for _, fromState := range exposed.FromStates {
-				out = append(out, bagIDsForName(instance, fromState)...)
-				out = append(out, bagIDsForState(instance, fromState)...)
-			}
+	if len(out) != 0 {
+		return uniqueStrings(out)
+	}
+	for _, exposed := range state.Exposes.Bags {
+		for _, fromState := range referencedStateIDs(exposed) {
+			out = append(out, referencedStateBagIDsForExposed(states, instance, fromState, exposed)...)
 		}
 	}
 	return uniqueStrings(out)
 }
 
-func aggregateInputBagIDsForExposed(state pipeline.StateSpec, instance core.PipelineInstance, exposed pipeline.BagSpec) []string {
-	if len(exposed.FromStates) == 0 {
-		return aggregateInputBagIDs(state, instance)
+func aggregateInputBagIDsForExposed(state pipeline.StateSpec, instance core.PipelineInstance, exposed pipeline.BagSpec, states map[string]pipeline.StateSpec) []string {
+	fromStates := referencedStateIDs(exposed)
+	if len(fromStates) == 0 {
+		return aggregateInputBagIDs(state, instance, states)
 	}
 	out := make([]string, 0)
-	for _, fromState := range exposed.FromStates {
-		out = append(out, bagIDsForName(instance, fromState)...)
-		out = append(out, bagIDsForState(instance, fromState)...)
+	for _, fromState := range fromStates {
+		out = append(out, referencedStateBagIDsForExposed(states, instance, fromState, exposed)...)
+	}
+	return uniqueStrings(out)
+}
+
+func referencedStateIDs(exposed pipeline.BagSpec) []string {
+	out := make([]string, 0, len(exposed.FromStates)+1)
+	if stateID := strings.TrimSpace(exposed.FromState); stateID != "" {
+		out = append(out, stateID)
+	}
+	for _, stateID := range exposed.FromStates {
+		stateID = strings.TrimSpace(stateID)
+		if stateID != "" {
+			out = append(out, stateID)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func referencedStateBagIDs(states map[string]pipeline.StateSpec, instance core.PipelineInstance, stateID string) []string {
+	stateID = strings.TrimSpace(stateID)
+	if stateID == "" {
+		return nil
+	}
+	out := make([]string, 0)
+	out = append(out, bagIDsForName(instance, stateID)...)
+	out = append(out, bagIDsForState(instance, stateID)...)
+	if state, ok := states[stateID]; ok {
+		for _, exposed := range state.Exposes.Bags {
+			out = append(out, exposedBagIDsForStateReference(instance, exposed)...)
+		}
+	}
+	return uniqueStrings(out)
+}
+
+func referencedStateBagIDsForExposed(states map[string]pipeline.StateSpec, instance core.PipelineInstance, stateID string, exposed pipeline.BagSpec) []string {
+	stateID = strings.TrimSpace(stateID)
+	if stateID == "" {
+		return nil
+	}
+	name := strings.TrimSpace(exposed.Name)
+	if name != "" {
+		if state, ok := states[stateID]; ok {
+			out := make([]string, 0)
+			for _, candidate := range state.Exposes.Bags {
+				if strings.TrimSpace(candidate.Name) != name {
+					continue
+				}
+				out = append(out, exposedBagIDsForStateReference(instance, candidate)...)
+			}
+			if len(out) > 0 {
+				return uniqueStrings(out)
+			}
+		}
+	}
+	return referencedStateBagIDs(states, instance, stateID)
+}
+
+func exposedBagIDsForStateReference(instance core.PipelineInstance, bag pipeline.BagSpec) []string {
+	name := strings.TrimSpace(bag.Name)
+	if name == "" {
+		return nil
+	}
+	if indexes := indexesForBagSpec(instance, bag); len(indexes) > 0 {
+		indexedKey := indexedBagLookupKey(name, indexes)
+		out := append([]string(nil), instance.OutputBagIDLists[indexedKey]...)
+		if value := strings.TrimSpace(instance.OutputBagIDs[indexedKey]); value != "" {
+			out = append(out, value)
+		}
+		if len(out) > 0 {
+			return uniqueStrings(out)
+		}
+		out = append([]string(nil), instance.InputBagIDLists[indexedKey]...)
+		if value := strings.TrimSpace(instance.InputBagIDs[indexedKey]); value != "" {
+			out = append(out, value)
+		}
+		if len(out) > 0 {
+			return uniqueStrings(out)
+		}
+	}
+	out := append([]string(nil), instance.OutputBagIDLists[name]...)
+	if value := strings.TrimSpace(instance.OutputBagIDs[name]); value != "" {
+		out = append(out, value)
+	}
+	if len(out) > 0 {
+		return uniqueStrings(out)
+	}
+	out = append([]string(nil), instance.InputBagIDLists[name]...)
+	if value := strings.TrimSpace(instance.InputBagIDs[name]); value != "" {
+		out = append(out, value)
 	}
 	return uniqueStrings(out)
 }
@@ -4342,6 +5752,23 @@ func resolvePipelineBindingExpr(parent core.PipelineInstance, expr string) (stri
 	default:
 		return "", fmt.Errorf("unsupported expression %q", expr)
 	}
+}
+
+func resolveForeachBindingExpr(parent core.PipelineInstance, expr string, itemKey string, itemValue string) (string, error) {
+	expr = strings.TrimSpace(expr)
+	if !strings.HasPrefix(expr, "${") || !strings.HasSuffix(expr, "}") {
+		return expr, nil
+	}
+	path := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(expr, "${"), "}"))
+	parts := strings.Split(path, ".")
+	if len(parts) == 2 && strings.TrimSpace(parts[0]) == "foreach" {
+		key := strings.TrimSpace(parts[1])
+		if key == itemKey {
+			return itemValue, nil
+		}
+		return "", fmt.Errorf("foreach has no value for %q", key)
+	}
+	return resolvePipelineBindingExpr(parent, expr)
 }
 
 func resolveControlBindingExpr(parent core.PipelineInstance, control core.Control, expr string) (string, error) {
@@ -5119,6 +6546,10 @@ func (s *Service) nextChildTaskID(ctx context.Context, runID core.RunID, parentI
 }
 
 func (s *Service) dispatchTask(ctx context.Context, run core.PipelineRun, task core.Task, op string, artifactURIs []string) error {
+	return s.dispatchTaskWithFact(ctx, run, task, op, artifactURIs, feedbackFactContext{})
+}
+
+func (s *Service) dispatchTaskWithFact(ctx context.Context, run core.PipelineRun, task core.Task, op string, artifactURIs []string, fact feedbackFactContext) error {
 	spec, err := s.pipelines.Get(ctx, run.PipelineID)
 	if err != nil {
 		return err
@@ -5150,18 +6581,28 @@ func (s *Service) dispatchTask(ctx context.Context, run core.PipelineRun, task c
 	}
 
 	payloadArtifactURIs := s.dispatchArtifactURIs(task, run.ID, op, artifactURIs)
+	provenance := s.taskDispatchProvenance(ctx, run.ID, task)
+	if fact.Committed {
+		provenance = fact.dispatchProvenance()
+	}
 	dispatch := core.TaskMetaData{
-		Direction:     core.TaskDirectionDispatch,
-		RunID:         run.ID,
-		TaskID:        task.ID,
-		ParentID:      task.ParentID,
-		DependsOnIDs:  task.DependsOnIDs,
-		AgentID:       task.AgentID,
-		Op:            op,
-		ArtifactURIs:  payloadArtifactURIs,
-		InputBagIDs:   task.InputBagIDs,
-		InputBags:     append([]core.BagBindingRef(nil), task.InputBags...),
-		ExecutionMode: task.ExecutionMode,
+		Direction:                core.TaskDirectionDispatch,
+		RunID:                    run.ID,
+		TaskID:                   task.ID,
+		ParentID:                 task.ParentID,
+		DependsOnIDs:             task.DependsOnIDs,
+		AgentID:                  task.AgentID,
+		Op:                       op,
+		SourceSnapshotID:         provenance.SourceSnapshotID,
+		SourceSnapshotVersionID:  provenance.SourceSnapshotVersionID,
+		SourceFrontierSnapshotID: provenance.SourceFrontierSnapshotID,
+		SourceRefName:            provenance.SourceRefName,
+		ContinuationID:           provenance.ContinuationID,
+		DecisionKind:             provenance.DecisionKind,
+		ArtifactURIs:             payloadArtifactURIs,
+		InputBagIDs:              task.InputBagIDs,
+		InputBags:                append([]core.BagBindingRef(nil), task.InputBags...),
+		ExecutionMode:            task.ExecutionMode,
 	}
 	if s.logger != nil {
 		_ = s.logger.LogTaskMeta(run.ID, "Orchestrator", "dispatch created", dispatch)
@@ -5187,6 +6628,17 @@ func (s *Service) dispatchTask(ctx context.Context, run core.PipelineRun, task c
 		return err
 	}
 	return s.dispatcher.Dispatch(ctx, dispatch)
+}
+
+func (f feedbackFactContext) dispatchProvenance() taskDispatchProvenance {
+	return taskDispatchProvenance{
+		SourceSnapshotID:         f.SnapshotID,
+		SourceSnapshotVersionID:  f.SnapshotVersionID,
+		SourceFrontierSnapshotID: f.FrontierSnapshotID,
+		SourceRefName:            f.RefName,
+		ContinuationID:           f.SnapshotID,
+		DecisionKind:             doujiagit.RefMoveModeAdvance,
+	}
 }
 
 func (s *Service) dispatchArtifactURIs(task core.Task, runID core.RunID, op string, artifactURIs []string) []string {
@@ -5269,6 +6721,61 @@ func toArtifactRefs(items []string) []core.ArtifactRef {
 		out = append(out, core.ArtifactRef(item))
 	}
 	return out
+}
+
+type taskDispatchProvenance struct {
+	SourceSnapshotID         string
+	SourceSnapshotVersionID  string
+	SourceFrontierSnapshotID string
+	SourceRefName            string
+	ContinuationID           string
+	DecisionKind             string
+}
+
+func (s *Service) taskDispatchProvenance(ctx context.Context, runID core.RunID, task core.Task) taskDispatchProvenance {
+	if s.doujiaGit == nil {
+		return taskDispatchProvenance{}
+	}
+	out := taskDispatchProvenance{
+		SourceRefName:  doujiagit.DefaultRefName,
+		ContinuationID: string(task.StageID),
+		DecisionKind:   doujiagit.RefMoveModeAdvance,
+	}
+	if ref, err := s.doujiaGit.GetRef(ctx, runID, doujiagit.DefaultRefName); err == nil {
+		out.SourceFrontierSnapshotID = ref.FrontierSnapshotID
+	}
+	sourceTaskID, ok := primaryTaskDependency(task)
+	if !ok && task.ParentID != nil {
+		sourceTaskID = *task.ParentID
+		ok = true
+	}
+	if !ok {
+		return out
+	}
+	snapshots, err := s.doujiaGit.ListSnapshotsByRun(ctx, runID)
+	if err != nil {
+		return out
+	}
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if snapshots[i].TaskID != sourceTaskID {
+			continue
+		}
+		out.SourceSnapshotID = snapshots[i].SnapshotID
+		out.SourceSnapshotVersionID = snapshots[i].SnapshotVersionID
+		return out
+	}
+	return out
+}
+
+func logicalSnapshotIDForTask(task core.Task) string {
+	stageID := strings.TrimSpace(string(task.StageID))
+	if stageID == "" {
+		stageID = strings.TrimSpace(string(task.ID))
+	}
+	if stageID == "" {
+		return ""
+	}
+	return "stage:" + stageID
 }
 
 func artifactRefsToStrings(items []core.ArtifactRef) []string {

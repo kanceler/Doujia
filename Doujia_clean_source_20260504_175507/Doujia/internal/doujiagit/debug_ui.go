@@ -319,6 +319,7 @@ const debugUIHTML = `<!doctype html>
         <div class="metric"><div id="metric-bags" class="value">0</div><div class="label">Artifact Bags</div></div>
         <div class="metric"><div id="metric-frontiers" class="value">0</div><div class="label">Frontiers</div></div>
         <div class="metric"><div id="metric-moves" class="value">0</div><div class="label">Ref Moves</div></div>
+        <div class="metric"><div id="metric-decisions" class="value">0</div><div class="label">Processing Decisions</div></div>
       </div>
 
       <section style="margin-bottom:16px">
@@ -423,6 +424,7 @@ const debugUIHTML = `<!doctype html>
       renderFlow(graph.snapshots || []);
       renderModules(graph.snapshots || []);
       renderRecoveries(graph.ref_move_events || []);
+      text("metric-decisions", (graph.processing_decisions || []).length);
       renderSnapshots(graph.snapshots || []);
       renderBags(graph.bags || []);
     }
@@ -444,7 +446,8 @@ const debugUIHTML = `<!doctype html>
       panel.innerHTML = "";
       panel.appendChild(el("div", "mono", ref.ref_name || "main"));
       panel.appendChild(row("current frontier", shortID(ref.frontier_snapshot_id || "-"), ref.frontier_snapshot_id));
-      panel.appendChild(row("legacy task frontier", (ref.frontier_snapshot_ids || []).map(shortID).join(", ") || "-", (ref.frontier_snapshot_ids || []).join(", ")));
+      panel.appendChild(row("frontier members", (ref.frontier_member_snapshot_ids || ref.frontier_snapshot_ids || []).map(shortID).join(", ") || "-", (ref.frontier_member_snapshot_ids || ref.frontier_snapshot_ids || []).join(", ")));
+      panel.appendChild(row("legacy member field", (ref.frontier_snapshot_ids || []).map(shortID).join(", ") || "-", (ref.frontier_snapshot_ids || []).join(", ")));
       panel.appendChild(row("updated", formatTime(ref.updated_at)));
     }
 

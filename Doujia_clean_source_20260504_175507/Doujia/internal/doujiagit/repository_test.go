@@ -143,13 +143,28 @@ func runRepositoryContract(t *testing.T, repository Repository) {
 	}
 	nextSnapshotID := "snapshot_task_02"
 	if err := repository.CreateSnapshot(ctx, TaskSnapshot{
-		SnapshotID:   nextSnapshotID,
-		RunID:        runID,
-		TaskID:       "task_02",
-		Result:       core.TaskResultCodeOK,
-		InputBagIDs:  []string{outputBagID},
-		OutputBagIDs: []string{nextBagID},
-		CreatedAt:    now.Add(2 * time.Second),
+		SnapshotID:                 nextSnapshotID,
+		RunID:                      runID,
+		TaskID:                     "task_02",
+		LogicalSnapshotID:          "logical_stage_test",
+		SnapshotVersionID:          "snapshot_task_02:v1",
+		SnapshotVersionNo:          1,
+		ArrivalKind:                RefMoveModeAdvance,
+		BranchKind:                 RefMoveModeRecover,
+		BranchFromSnapshotID:       snapshotID,
+		RecoverFromSnapshotID:      "snapshot_test_failed",
+		RecoverTargetSnapshotIDs:   []string{snapshotID, snapshotID},
+		ReusableSnapshotIDs:        []string{"snapshot_test_data_returned", "snapshot_test_data_returned"},
+		RecoverAnchorSnapshotIDs:   []string{snapshotID},
+		PreviousAttemptSnapshotIDs: []string{"snapshot_code_done_v1", "snapshot_code_done_v1"},
+		FailureReportBagIDs:        []string{"bag_test_failure", "bag_test_failure"},
+		PreviousOutputBagIDs:       []string{outputBagID, outputBagID},
+		RepairTargetTransitionID:   "write_code",
+		RepairTargetTaskID:         "task_01",
+		Result:                     core.TaskResultCodeOK,
+		InputBagIDs:                []string{" ", outputBagID, outputBagID},
+		OutputBagIDs:               []string{nextBagID},
+		CreatedAt:                  now.Add(2 * time.Second),
 	}); err != nil {
 		t.Fatalf("CreateSnapshot(task_02) error = %v", err)
 	}
@@ -160,6 +175,25 @@ func runRepositoryContract(t *testing.T, repository Repository) {
 	}
 	if !reflect.DeepEqual(gotSnapshot.InputBagIDs, []string{outputBagID}) {
 		t.Fatalf("snapshot inputs = %v, want [%s]", gotSnapshot.InputBagIDs, outputBagID)
+	}
+	if gotSnapshot.LogicalSnapshotID != "logical_stage_test" ||
+		gotSnapshot.SnapshotVersionID != "snapshot_task_02:v1" ||
+		gotSnapshot.SnapshotVersionNo != 1 ||
+		gotSnapshot.ArrivalKind != RefMoveModeAdvance {
+		t.Fatalf("snapshot version fields = %+v", gotSnapshot)
+	}
+	if gotSnapshot.BranchKind != RefMoveModeRecover ||
+		gotSnapshot.BranchFromSnapshotID != snapshotID ||
+		gotSnapshot.RecoverFromSnapshotID != "snapshot_test_failed" ||
+		!reflect.DeepEqual(gotSnapshot.RecoverTargetSnapshotIDs, []string{snapshotID}) ||
+		!reflect.DeepEqual(gotSnapshot.ReusableSnapshotIDs, []string{"snapshot_test_data_returned"}) ||
+		!reflect.DeepEqual(gotSnapshot.RecoverAnchorSnapshotIDs, []string{snapshotID}) ||
+		!reflect.DeepEqual(gotSnapshot.PreviousAttemptSnapshotIDs, []string{"snapshot_code_done_v1"}) ||
+		!reflect.DeepEqual(gotSnapshot.FailureReportBagIDs, []string{"bag_test_failure"}) ||
+		!reflect.DeepEqual(gotSnapshot.PreviousOutputBagIDs, []string{outputBagID}) ||
+		gotSnapshot.RepairTargetTransitionID != "write_code" ||
+		gotSnapshot.RepairTargetTaskID != "task_01" {
+		t.Fatalf("snapshot repair branch metadata = %+v", gotSnapshot)
 	}
 
 	frontierID := "frontier_task_02"
@@ -192,11 +226,11 @@ func runRepositoryContract(t *testing.T, repository Repository) {
 	}
 
 	if err := repository.UpdateRef(ctx, Ref{
-		RefName:             DefaultRefName,
-		RunID:               runID,
-		FrontierSnapshotID:  frontierID,
-		FrontierSnapshotIDs: []string{nextSnapshotID},
-		UpdatedAt:           now.Add(4 * time.Second),
+		RefName:                   DefaultRefName,
+		RunID:                     runID,
+		FrontierSnapshotID:        frontierID,
+		FrontierMemberSnapshotIDs: []string{" ", nextSnapshotID, nextSnapshotID},
+		UpdatedAt:                 now.Add(4 * time.Second),
 	}); err != nil {
 		t.Fatalf("UpdateRef() error = %v", err)
 	}
@@ -205,7 +239,10 @@ func runRepositoryContract(t *testing.T, repository Repository) {
 		t.Fatalf("GetRef() error = %v", err)
 	}
 	if !reflect.DeepEqual(gotRef.FrontierSnapshotIDs, []string{nextSnapshotID}) {
-		t.Fatalf("ref frontier = %v, want [%s]", gotRef.FrontierSnapshotIDs, nextSnapshotID)
+		t.Fatalf("legacy ref frontier members = %v, want [%s]", gotRef.FrontierSnapshotIDs, nextSnapshotID)
+	}
+	if !reflect.DeepEqual(gotRef.FrontierMemberSnapshotIDs, []string{nextSnapshotID}) {
+		t.Fatalf("ref frontier members = %v, want [%s]", gotRef.FrontierMemberSnapshotIDs, nextSnapshotID)
 	}
 	if gotRef.FrontierSnapshotID != frontierID {
 		t.Fatalf("ref current frontier = %q, want %q", gotRef.FrontierSnapshotID, frontierID)
@@ -223,11 +260,11 @@ func runRepositoryContract(t *testing.T, repository Repository) {
 	}
 	movedRef, moveEvent, err := repository.MoveRef(ctx, MoveRefRequest{
 		Ref: Ref{
-			RefName:             DefaultRefName,
-			RunID:               runID,
-			FrontierSnapshotID:  movedFrontierID,
-			FrontierSnapshotIDs: []string{nextSnapshotID},
-			UpdatedAt:           now.Add(4600 * time.Millisecond),
+			RefName:                   DefaultRefName,
+			RunID:                     runID,
+			FrontierSnapshotID:        movedFrontierID,
+			FrontierMemberSnapshotIDs: []string{nextSnapshotID},
+			UpdatedAt:                 now.Add(4600 * time.Millisecond),
 		},
 		ExpectedFrontierSnapshotID: frontierID,
 		Event: RefMoveEvent{
@@ -246,6 +283,98 @@ func runRepositoryContract(t *testing.T, repository Repository) {
 	}
 	if movedRef.FrontierSnapshotID != movedFrontierID || moveEvent.Mode != RefMoveModeCheckout {
 		t.Fatalf("MoveRef() = ref %+v event %+v, want checkout to %s", movedRef, moveEvent, movedFrontierID)
+	}
+	if !reflect.DeepEqual(movedRef.FrontierMemberSnapshotIDs, []string{nextSnapshotID}) ||
+		!reflect.DeepEqual(movedRef.FrontierSnapshotIDs, []string{nextSnapshotID}) {
+		t.Fatalf("moved ref members = new %v legacy %v, want [%s]", movedRef.FrontierMemberSnapshotIDs, movedRef.FrontierSnapshotIDs, nextSnapshotID)
+	}
+	decision := SnapshotProcessingDecision{
+		RunID:                       runID,
+		RefName:                     "",
+		SnapshotID:                  nextSnapshotID,
+		SnapshotVersionID:           gotSnapshot.SnapshotVersionID,
+		Status:                      SnapshotProcessingStatusAdvanced,
+		DecisionKind:                RefMoveModeAdvance,
+		ContinuationID:              "task_03",
+		ProducedTaskIDs:             []string{"task_03", "task_03", " "},
+		ProducedPipelineInstanceIDs: []string{"root_module01", "root_module01"},
+		ConsumedSnapshotIDs:         []string{snapshotID, snapshotID, " "},
+		ProducedSnapshotIDs:         []string{nextSnapshotID, nextSnapshotID},
+		FromFrontierSnapshotID:      frontierID,
+		ToFrontierSnapshotID:        movedFrontierID,
+		RecoverTargetSnapshotIDs:    []string{snapshotID, nextSnapshotID, snapshotID},
+		ReusableSnapshotIDs:         []string{nextSnapshotID, nextSnapshotID},
+		RecoverAnchorSnapshotIDs:    []string{snapshotID},
+		FailedSnapshotID:            nextSnapshotID,
+		PreviousAttemptSnapshotIDs:  []string{snapshotID, snapshotID},
+		FailureReportBagIDs:         []string{outputBagID, outputBagID},
+		PreviousOutputBagIDs:        []string{nextBagID, nextBagID},
+		RepairTargetTransitionID:    "write_code",
+		RepairTargetTaskID:          "task_02",
+		Reason:                      "active ref member consumed",
+		CreatedAt:                   now.Add(4650 * time.Millisecond),
+		UpdatedAt:                   now.Add(4650 * time.Millisecond),
+	}
+	if err := repository.CreateSnapshotProcessingDecision(ctx, decision); err != nil {
+		t.Fatalf("CreateSnapshotProcessingDecision() error = %v", err)
+	}
+	gotDecision, err := repository.GetSnapshotProcessingDecision(ctx, runID, DefaultRefName, nextSnapshotID)
+	if err != nil {
+		t.Fatalf("GetSnapshotProcessingDecision() error = %v", err)
+	}
+	if gotDecision.DecisionID == "" {
+		t.Fatalf("decision id should be filled")
+	}
+	if gotDecision.RefName != DefaultRefName ||
+		gotDecision.SnapshotID != nextSnapshotID ||
+		gotDecision.SnapshotVersionID != gotSnapshot.SnapshotVersionID ||
+		gotDecision.Status != SnapshotProcessingStatusAdvanced ||
+		gotDecision.DecisionKind != RefMoveModeAdvance ||
+		gotDecision.ContinuationID != "task_03" {
+		t.Fatalf("processing decision = %+v, want normalized advanced decision", gotDecision)
+	}
+	if !reflect.DeepEqual(gotDecision.ProducedTaskIDs, []string{"task_03"}) {
+		t.Fatalf("decision produced task ids = %#v, want normalized task_03", gotDecision.ProducedTaskIDs)
+	}
+	if !reflect.DeepEqual(gotDecision.ProducedPipelineInstanceIDs, []string{"root_module01"}) {
+		t.Fatalf("decision produced instance ids = %#v, want normalized root_module01", gotDecision.ProducedPipelineInstanceIDs)
+	}
+	if !reflect.DeepEqual(gotDecision.ConsumedSnapshotIDs, []string{snapshotID}) ||
+		!reflect.DeepEqual(gotDecision.ProducedSnapshotIDs, []string{nextSnapshotID}) ||
+		gotDecision.FromFrontierSnapshotID != frontierID ||
+		gotDecision.ToFrontierSnapshotID != movedFrontierID {
+		t.Fatalf("decision replacement fields = %+v", gotDecision)
+	}
+	if !reflect.DeepEqual(gotDecision.RecoverTargetSnapshotIDs, []string{snapshotID, nextSnapshotID}) ||
+		!reflect.DeepEqual(gotDecision.ReusableSnapshotIDs, []string{nextSnapshotID}) ||
+		!reflect.DeepEqual(gotDecision.RecoverAnchorSnapshotIDs, []string{snapshotID}) ||
+		gotDecision.FailedSnapshotID != nextSnapshotID ||
+		!reflect.DeepEqual(gotDecision.PreviousAttemptSnapshotIDs, []string{snapshotID}) ||
+		!reflect.DeepEqual(gotDecision.FailureReportBagIDs, []string{outputBagID}) ||
+		!reflect.DeepEqual(gotDecision.PreviousOutputBagIDs, []string{nextBagID}) ||
+		gotDecision.RepairTargetTransitionID != "write_code" ||
+		gotDecision.RepairTargetTaskID != "task_02" {
+		t.Fatalf("decision recover fields = %+v", gotDecision)
+	}
+	decisions, err := repository.ListSnapshotProcessingDecisions(ctx, runID, DefaultRefName)
+	if err != nil {
+		t.Fatalf("ListSnapshotProcessingDecisions() error = %v", err)
+	}
+	if len(decisions) != 1 || decisions[0].SnapshotID != nextSnapshotID {
+		t.Fatalf("processing decisions = %+v, want one decision for %s", decisions, nextSnapshotID)
+	}
+	if err := repository.CreateSnapshotProcessingDecision(ctx, decision); err == nil {
+		t.Fatal("duplicate processing decision error = nil, want uniqueness error")
+	}
+	if err := repository.CreateSnapshotProcessingDecision(ctx, SnapshotProcessingDecision{
+		RunID:      runID,
+		RefName:    DefaultRefName,
+		SnapshotID: "snapshot_bad_status",
+		Status:     "maybe",
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err == nil {
+		t.Fatal("invalid processing decision status error = nil, want validation error")
 	}
 	_, _, err = repository.MoveRef(ctx, MoveRefRequest{
 		Ref: Ref{

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -377,6 +378,45 @@ func TestPipelineBugBubblesToParentReceivedHandler(t *testing.T) {
 	}
 	if len(retryTask.InputBags) != 1 || retryTask.InputBags[0].BagID != owner.OutputBagIDs["code_bag"] {
 		t.Fatalf("retry input bag bindings = %+v, want replacement code bag %s", retryTask.InputBags, owner.OutputBagIDs["code_bag"])
+	}
+	snapshots, err := doujiaGitRepo.ListSnapshotsByRun(ctx, "run_bubble")
+	if err != nil {
+		t.Fatalf("ListSnapshotsByRun() error = %v", err)
+	}
+	var failedSnapshot, repairSnapshot doujiagit.TaskSnapshot
+	for _, snapshot := range snapshots {
+		switch snapshot.TaskID {
+		case "checker01_test_code":
+			failedSnapshot = snapshot
+		case "owner01_debug_code":
+			repairSnapshot = snapshot
+		}
+	}
+	if failedSnapshot.SnapshotID == "" || failedSnapshot.Result != core.TaskResultCodeBug {
+		t.Fatalf("failed snapshot = %+v, want checker kbug history", failedSnapshot)
+	}
+	if repairSnapshot.SnapshotID == "" {
+		t.Fatalf("repair snapshot not found in %+v", snapshots)
+	}
+	if repairSnapshot.BranchKind != doujiagit.DecisionKindRepair ||
+		repairSnapshot.RecoverFromSnapshotID != failedSnapshot.SnapshotID ||
+		!reflect.DeepEqual(repairSnapshot.FailureReportBagIDs, failedSnapshot.OutputBagIDs) ||
+		!reflect.DeepEqual(repairSnapshot.PreviousOutputBagIDs, []string{"bag_code_v1"}) ||
+		repairSnapshot.RepairTargetTransitionID != "debug_code" ||
+		repairSnapshot.RepairTargetTaskID != "owner01_debug_code" {
+		t.Fatalf("repair snapshot metadata = %+v, failed = %+v", repairSnapshot, failedSnapshot)
+	}
+	decision, err := doujiaGitRepo.GetSnapshotProcessingDecision(ctx, "run_bubble", doujiagit.DefaultRefName, repairSnapshot.SnapshotID)
+	if err != nil {
+		t.Fatalf("GetSnapshotProcessingDecision(repair) error = %v", err)
+	}
+	if decision.DecisionKind != doujiagit.DecisionKindRepair ||
+		decision.FailedSnapshotID != failedSnapshot.SnapshotID ||
+		!reflect.DeepEqual(decision.FailureReportBagIDs, failedSnapshot.OutputBagIDs) ||
+		!reflect.DeepEqual(decision.PreviousOutputBagIDs, []string{"bag_code_v1"}) ||
+		decision.RepairTargetTransitionID != "debug_code" ||
+		decision.RepairTargetTaskID != "owner01_debug_code" {
+		t.Fatalf("repair processing decision = %+v", decision)
 	}
 }
 

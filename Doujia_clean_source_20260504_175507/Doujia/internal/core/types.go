@@ -117,23 +117,29 @@ type Control struct {
 }
 
 type TaskMetaData struct {
-	Direction     TaskDirection         `json:"direction"`
-	RunID         RunID                 `json:"run_id"`
-	TaskID        TaskID                `json:"task_id"`
-	ParentID      *TaskID               `json:"parent_id,omitempty"`
-	DependsOnIDs  []TaskID              `json:"depends_on_ids,omitempty"`
-	AgentID       AgentID               `json:"agent_id"`
-	Op            string                `json:"op"`
-	ArtifactURIs  []string              `json:"artifact_uris"`
-	InputBagIDs   []string              `json:"input_bag_ids,omitempty"`
-	InputBags     []BagBindingRef       `json:"input_bags,omitempty"`
-	InputBundle   *AgentInputBundle     `json:"input_bundle,omitempty"`
-	ExecutionMode ExecutionMode         `json:"execution_mode,omitempty"`
-	Result        TaskResultCode        `json:"result,omitempty"`
-	Outputs       []AgentOutput         `json:"outputs,omitempty"`
-	ProducedBags  []ProducedBagManifest `json:"produced_bags,omitempty"`
-	Control       []Control             `json:"control,omitempty"`
-	Commit        *CommitReceipt        `json:"commit_receipt,omitempty"`
+	Direction                TaskDirection         `json:"direction"`
+	RunID                    RunID                 `json:"run_id"`
+	TaskID                   TaskID                `json:"task_id"`
+	ParentID                 *TaskID               `json:"parent_id,omitempty"`
+	DependsOnIDs             []TaskID              `json:"depends_on_ids,omitempty"`
+	AgentID                  AgentID               `json:"agent_id"`
+	Op                       string                `json:"op"`
+	SourceSnapshotID         string                `json:"source_snapshot_id,omitempty"`
+	SourceSnapshotVersionID  string                `json:"source_snapshot_version_id,omitempty"`
+	SourceFrontierSnapshotID string                `json:"source_frontier_snapshot_id,omitempty"`
+	SourceRefName            string                `json:"source_ref_name,omitempty"`
+	ContinuationID           string                `json:"continuation_id,omitempty"`
+	DecisionKind             string                `json:"decision_kind,omitempty"`
+	ArtifactURIs             []string              `json:"artifact_uris"`
+	InputBagIDs              []string              `json:"input_bag_ids,omitempty"`
+	InputBags                []BagBindingRef       `json:"input_bags,omitempty"`
+	InputBundle              *AgentInputBundle     `json:"input_bundle,omitempty"`
+	ExecutionMode            ExecutionMode         `json:"execution_mode,omitempty"`
+	Result                   TaskResultCode        `json:"result,omitempty"`
+	Outputs                  []AgentOutput         `json:"outputs,omitempty"`
+	ProducedBags             []ProducedBagManifest `json:"produced_bags,omitempty"`
+	Control                  []Control             `json:"control,omitempty"`
+	Commit                   *CommitReceipt        `json:"commit_receipt,omitempty"`
 }
 
 type AgentInputBundle struct {

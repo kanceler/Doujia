@@ -1,0 +1,106 @@
+{
+  "schema_version": "devflow.pipeline.registry/v0.4",
+  "registry_id": "scheduling_parallel_merge_registry",
+  "entry_pipeline_id": "parallel_merge",
+  "pipeline_defs": [
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "parallel_merge",
+      "kind": "entry",
+      "name": "Parallel Merge",
+      "signature": {
+        "output_bags": [{"name": "merged_context"}]
+      },
+      "namespace": {
+        "agents": [
+          {"name": "coder", "role": "coder", "default_agent_id": "coder01"},
+          {"name": "tester", "role": "tester", "default_agent_id": "tester01"},
+          {"name": "architect", "role": "architect", "default_agent_id": "architect01"}
+        ],
+        "bags": [
+          {"name": "module_input"},
+          {"name": "code_bag"},
+          {"name": "test_data"},
+          {"name": "merged_context"}
+        ]
+      },
+      "start_state": "module_ready",
+      "delivery_state": "merged",
+      "states": [
+        {
+          "id": "module_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "next": {"type": "all", "transitions": ["write_code", "write_test_data"]}
+        },
+        {
+          "id": "code_written",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "write_code"},
+          "exposes": {"bags": [{"name": "code_bag", "from_transition": "write_code", "collection": true, "indexed_by": ["module_key"]}]}
+        },
+        {
+          "id": "test_data_written",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "write_test_data"},
+          "exposes": {"bags": [{"name": "test_data", "from_transition": "write_test_data", "collection": true, "indexed_by": ["module_key"]}]}
+        },
+        {
+          "id": "ready_to_merge",
+          "kind": "aggregate",
+          "proof": {
+            "type": "aggregate",
+            "mode": "join_bags",
+            "join_by": ["module_key"],
+            "sources": [
+              {"state": "code_written", "name": "code_bag"},
+              {"state": "test_data_written", "name": "test_data"}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["merge_context"]}
+        },
+        {
+          "id": "merged",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "merge_context"},
+          "exposes": {"bags": [{"name": "merged_context", "from_transition": "merge_context"}]}
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_code",
+          "kind": "task",
+          "from_state": "module_ready",
+          "to_state": "code_written",
+          "agent": {"role": "coder", "alias": "coder"},
+          "op": "write_code",
+          "input_bags": [{"name": "module_input", "from_state": "module_ready"}],
+          "output_bags": [{"name": "code_bag", "required": true}]
+        },
+        {
+          "id": "write_test_data",
+          "kind": "task",
+          "from_state": "module_ready",
+          "to_state": "test_data_written",
+          "agent": {"role": "tester", "alias": "tester"},
+          "op": "test_data",
+          "input_bags": [{"name": "module_input", "from_state": "module_ready"}],
+          "output_bags": [{"name": "test_data", "required": true}]
+        },
+        {
+          "id": "merge_context",
+          "kind": "task",
+          "from_state": "ready_to_merge",
+          "to_state": "merged",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "merge_code",
+          "input_bags": [
+            {"name": "code_bag", "from_state": "code_written"},
+            {"name": "test_data", "from_state": "test_data_written"}
+          ],
+          "output_bags": [{"name": "merged_context", "required": true}]
+        }
+      ]
+    }
+  ]
+}

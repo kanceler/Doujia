@@ -49,7 +49,12 @@ func TestDebugHandlerServesRunGraphAndTaskDetail(t *testing.T) {
 	if body := graphResp.Body.String(); !strings.Contains(body, `"frontier_snapshots"`) ||
 		!strings.Contains(body, `"refs"`) ||
 		!strings.Contains(body, `"ref_move_events"`) ||
+		!strings.Contains(body, `"processing_decisions"`) ||
+		!strings.Contains(body, `"status": "advanced"`) ||
+		!strings.Contains(body, `"produced_task_ids":`) ||
 		!strings.Contains(body, `"frontier_snapshot_id": "frontier_debug_http"`) ||
+		!strings.Contains(body, `"frontier_member_snapshot_ids":`) ||
+		!strings.Contains(body, `"snapshot_version_id": "snapshot_debug_http:v1"`) ||
 		!strings.Contains(body, versionID) {
 		t.Fatalf("graph body missing expected content:\n%s", body)
 	}
@@ -60,7 +65,8 @@ func TestDebugHandlerServesRunGraphAndTaskDetail(t *testing.T) {
 	if refResp.Code != http.StatusOK {
 		t.Fatalf("ref status = %d body=%s", refResp.Code, refResp.Body.String())
 	}
-	if body := refResp.Body.String(); !strings.Contains(body, `"frontier_snapshot_id": "frontier_debug_http"`) {
+	if body := refResp.Body.String(); !strings.Contains(body, `"frontier_snapshot_id": "frontier_debug_http"`) ||
+		!strings.Contains(body, `"frontier_member_snapshot_ids":`) {
 		t.Fatalf("ref body missing current frontier:\n%s", body)
 	}
 
@@ -168,12 +174,16 @@ func seedDebugHTTPGraph(t *testing.T, ctx context.Context, repository Repository
 	}
 	snapshotID := "snapshot_debug_http"
 	if err := repository.CreateSnapshot(ctx, TaskSnapshot{
-		SnapshotID:   snapshotID,
-		RunID:        runID,
-		TaskID:       "task_01",
-		Result:       core.TaskResultCodeOK,
-		OutputBagIDs: []string{bagID},
-		CreatedAt:    now,
+		SnapshotID:        snapshotID,
+		RunID:             runID,
+		TaskID:            "task_01",
+		LogicalSnapshotID: "logical_task_01",
+		SnapshotVersionID: "snapshot_debug_http:v1",
+		SnapshotVersionNo: 1,
+		ArrivalKind:       RefMoveModeAdvance,
+		Result:            core.TaskResultCodeOK,
+		OutputBagIDs:      []string{bagID},
+		CreatedAt:         now,
 	}); err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
@@ -190,11 +200,11 @@ func seedDebugHTTPGraph(t *testing.T, ctx context.Context, repository Repository
 		t.Fatalf("CreateFrontierSnapshot() error = %v", err)
 	}
 	if err := repository.UpdateRef(ctx, Ref{
-		RefName:             DefaultRefName,
-		RunID:               runID,
-		FrontierSnapshotID:  frontierID,
-		FrontierSnapshotIDs: []string{snapshotID},
-		UpdatedAt:           now,
+		RefName:                   DefaultRefName,
+		RunID:                     runID,
+		FrontierSnapshotID:        frontierID,
+		FrontierMemberSnapshotIDs: []string{snapshotID},
+		UpdatedAt:                 now,
 	}); err != nil {
 		t.Fatalf("UpdateRef() error = %v", err)
 	}
@@ -209,6 +219,19 @@ func seedDebugHTTPGraph(t *testing.T, ctx context.Context, repository Repository
 		CreatedAt:             now,
 	}); err != nil {
 		t.Fatalf("CreateRefMoveEvent() error = %v", err)
+	}
+	if err := repository.CreateSnapshotProcessingDecision(ctx, SnapshotProcessingDecision{
+		RunID:           runID,
+		RefName:         DefaultRefName,
+		SnapshotID:      snapshotID,
+		Status:          SnapshotProcessingStatusAdvanced,
+		DecisionKind:    RefMoveModeAdvance,
+		ContinuationID:  "task_02",
+		ProducedTaskIDs: []string{"task_02"},
+		CreatedAt:       now.Add(time.Second),
+		UpdatedAt:       now.Add(time.Second),
+	}); err != nil {
+		t.Fatalf("CreateSnapshotProcessingDecision() error = %v", err)
 	}
 	return version.ArtifactVersionID
 }

@@ -11,42 +11,59 @@ import (
 )
 
 type RunGraph struct {
-	RunID             core.RunID             `json:"run_id"`
-	Ref               RefView                `json:"ref"`
-	Refs              []RefView              `json:"refs,omitempty"`
-	FrontierSnapshots []FrontierSnapshotView `json:"frontier_snapshots,omitempty"`
-	RefMoveEvents     []RefMoveEventView     `json:"ref_move_events,omitempty"`
-	Snapshots         []SnapshotView         `json:"snapshots"`
-	Bags              []BagView              `json:"bags,omitempty"`
-	HistorySnapshots  []SnapshotView         `json:"history_snapshots,omitempty"`
-	HistoryBags       []BagView              `json:"history_bags,omitempty"`
-	HistoryFrontiers  []FrontierSnapshotView `json:"history_frontier_snapshots,omitempty"`
+	RunID               core.RunID                       `json:"run_id"`
+	Ref                 RefView                          `json:"ref"`
+	Refs                []RefView                        `json:"refs,omitempty"`
+	FrontierSnapshots   []FrontierSnapshotView           `json:"frontier_snapshots,omitempty"`
+	RefMoveEvents       []RefMoveEventView               `json:"ref_move_events,omitempty"`
+	ProcessingDecisions []SnapshotProcessingDecisionView `json:"processing_decisions,omitempty"`
+	Snapshots           []SnapshotView                   `json:"snapshots"`
+	Bags                []BagView                        `json:"bags,omitempty"`
+	HistorySnapshots    []SnapshotView                   `json:"history_snapshots,omitempty"`
+	HistoryBags         []BagView                        `json:"history_bags,omitempty"`
+	HistoryFrontiers    []FrontierSnapshotView           `json:"history_frontier_snapshots,omitempty"`
 }
 
 type RefView struct {
-	RefName             string    `json:"ref_name"`
-	FrontierSnapshotID  string    `json:"frontier_snapshot_id,omitempty"`
-	FrontierSnapshotIDs []string  `json:"frontier_snapshot_ids"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	RefName                   string    `json:"ref_name"`
+	FrontierSnapshotID        string    `json:"frontier_snapshot_id,omitempty"`
+	FrontierMemberSnapshotIDs []string  `json:"frontier_member_snapshot_ids,omitempty"`
+	FrontierSnapshotIDs       []string  `json:"frontier_snapshot_ids"`
+	UpdatedAt                 time.Time `json:"updated_at"`
 }
 
 type SnapshotView struct {
-	SnapshotID         string                  `json:"snapshot_id"`
-	RunID              core.RunID              `json:"run_id"`
-	TaskID             core.TaskID             `json:"task_id"`
-	PipelineInstanceID core.PipelineInstanceID `json:"pipeline_instance_id,omitempty"`
-	TransitionID       core.StageID            `json:"transition_id,omitempty"`
-	AgentRole          core.AgentRole          `json:"agent_role,omitempty"`
-	AgentID            core.AgentID            `json:"agent_id,omitempty"`
-	Op                 string                  `json:"op,omitempty"`
-	Result             core.TaskResultCode     `json:"result"`
-	InputBagIDs        []string                `json:"input_bag_ids,omitempty"`
-	OutputBagIDs       []string                `json:"output_bag_ids,omitempty"`
-	InputBags          []BagView               `json:"input_bags,omitempty"`
-	OutputBags         []BagView               `json:"output_bags,omitempty"`
-	DiagnosticsJSON    string                  `json:"diagnostics_json,omitempty"`
-	RuntimeContextJSON string                  `json:"runtime_context_json,omitempty"`
-	CreatedAt          time.Time               `json:"created_at"`
+	SnapshotID                 string                  `json:"snapshot_id"`
+	RunID                      core.RunID              `json:"run_id"`
+	TaskID                     core.TaskID             `json:"task_id"`
+	LogicalSnapshotID          string                  `json:"logical_snapshot_id,omitempty"`
+	SnapshotVersionID          string                  `json:"snapshot_version_id,omitempty"`
+	SnapshotVersionNo          int                     `json:"snapshot_version_no,omitempty"`
+	ArrivalKind                string                  `json:"arrival_kind,omitempty"`
+	BranchKind                 string                  `json:"branch_kind,omitempty"`
+	BranchFromSnapshotID       string                  `json:"branch_from_snapshot_id,omitempty"`
+	RecoverFromSnapshotID      string                  `json:"recover_from_snapshot_id,omitempty"`
+	RecoverTargetSnapshotIDs   []string                `json:"recover_target_snapshot_ids,omitempty"`
+	ReusableSnapshotIDs        []string                `json:"reusable_snapshot_ids,omitempty"`
+	RecoverAnchorSnapshotIDs   []string                `json:"recover_anchor_snapshot_ids,omitempty"`
+	PreviousAttemptSnapshotIDs []string                `json:"previous_attempt_snapshot_ids,omitempty"`
+	FailureReportBagIDs        []string                `json:"failure_report_bag_ids,omitempty"`
+	PreviousOutputBagIDs       []string                `json:"previous_output_bag_ids,omitempty"`
+	RepairTargetTransitionID   string                  `json:"repair_target_transition_id,omitempty"`
+	RepairTargetTaskID         string                  `json:"repair_target_task_id,omitempty"`
+	PipelineInstanceID         core.PipelineInstanceID `json:"pipeline_instance_id,omitempty"`
+	TransitionID               core.StageID            `json:"transition_id,omitempty"`
+	AgentRole                  core.AgentRole          `json:"agent_role,omitempty"`
+	AgentID                    core.AgentID            `json:"agent_id,omitempty"`
+	Op                         string                  `json:"op,omitempty"`
+	Result                     core.TaskResultCode     `json:"result"`
+	InputBagIDs                []string                `json:"input_bag_ids,omitempty"`
+	OutputBagIDs               []string                `json:"output_bag_ids,omitempty"`
+	InputBags                  []BagView               `json:"input_bags,omitempty"`
+	OutputBags                 []BagView               `json:"output_bags,omitempty"`
+	DiagnosticsJSON            string                  `json:"diagnostics_json,omitempty"`
+	RuntimeContextJSON         string                  `json:"runtime_context_json,omitempty"`
+	CreatedAt                  time.Time               `json:"created_at"`
 }
 
 type FrontierSnapshotView struct {
@@ -70,6 +87,35 @@ type RefMoveEventView struct {
 	Reason                  string     `json:"reason,omitempty"`
 	DetailsJSON             string     `json:"details_json,omitempty"`
 	CreatedAt               time.Time  `json:"created_at"`
+}
+
+type SnapshotProcessingDecisionView struct {
+	DecisionID                  string     `json:"decision_id"`
+	RunID                       core.RunID `json:"run_id"`
+	RefName                     string     `json:"ref_name"`
+	SnapshotID                  string     `json:"snapshot_id"`
+	SnapshotVersionID           string     `json:"snapshot_version_id,omitempty"`
+	Status                      string     `json:"status"`
+	DecisionKind                string     `json:"decision_kind,omitempty"`
+	ContinuationID              string     `json:"continuation_id,omitempty"`
+	Reason                      string     `json:"reason,omitempty"`
+	ProducedTaskIDs             []string   `json:"produced_task_ids,omitempty"`
+	ProducedPipelineInstanceIDs []string   `json:"produced_pipeline_instance_ids,omitempty"`
+	ConsumedSnapshotIDs         []string   `json:"consumed_snapshot_ids,omitempty"`
+	ProducedSnapshotIDs         []string   `json:"produced_snapshot_ids,omitempty"`
+	FromFrontierSnapshotID      string     `json:"from_frontier_snapshot_id,omitempty"`
+	ToFrontierSnapshotID        string     `json:"to_frontier_snapshot_id,omitempty"`
+	RecoverTargetSnapshotIDs    []string   `json:"recover_target_snapshot_ids,omitempty"`
+	ReusableSnapshotIDs         []string   `json:"reusable_snapshot_ids,omitempty"`
+	RecoverAnchorSnapshotIDs    []string   `json:"recover_anchor_snapshot_ids,omitempty"`
+	FailedSnapshotID            string     `json:"failed_snapshot_id,omitempty"`
+	PreviousAttemptSnapshotIDs  []string   `json:"previous_attempt_snapshot_ids,omitempty"`
+	FailureReportBagIDs         []string   `json:"failure_report_bag_ids,omitempty"`
+	PreviousOutputBagIDs        []string   `json:"previous_output_bag_ids,omitempty"`
+	RepairTargetTransitionID    string     `json:"repair_target_transition_id,omitempty"`
+	RepairTargetTaskID          string     `json:"repair_target_task_id,omitempty"`
+	CreatedAt                   time.Time  `json:"created_at"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
 }
 
 type BagView struct {
@@ -141,6 +187,10 @@ func BuildRunGraph(ctx context.Context, repository Repository, runID core.RunID,
 	if err != nil {
 		return RunGraph{}, err
 	}
+	decisions, err := repository.ListSnapshotProcessingDecisions(ctx, runID, ref.RefName)
+	if err != nil {
+		return RunGraph{}, err
+	}
 
 	visibleSnapshots := make([]TaskSnapshot, 0, len(reachableSnapshots))
 	for _, snapshot := range snapshots {
@@ -202,22 +252,27 @@ func BuildRunGraph(ctx context.Context, repository Repository, runID core.RunID,
 	for _, event := range refMoves {
 		refMoveViews = append(refMoveViews, refMoveEventView(event))
 	}
+	decisionViews := make([]SnapshotProcessingDecisionView, 0, len(decisions))
+	for _, decision := range decisions {
+		decisionViews = append(decisionViews, snapshotProcessingDecisionView(decision))
+	}
 	refViews := make([]RefView, 0, len(refs))
 	for _, item := range refs {
 		refViews = append(refViews, refView(item))
 	}
 
 	return RunGraph{
-		RunID:             runID,
-		Ref:               refView(ref),
-		Refs:              refViews,
-		FrontierSnapshots: frontierViews,
-		RefMoveEvents:     refMoveViews,
-		Snapshots:         snapshotViews,
-		Bags:              bagViews,
-		HistorySnapshots:  historySnapshotViews,
-		HistoryBags:       historyBagViews,
-		HistoryFrontiers:  historyFrontierViews,
+		RunID:               runID,
+		Ref:                 refView(ref),
+		Refs:                refViews,
+		FrontierSnapshots:   frontierViews,
+		RefMoveEvents:       refMoveViews,
+		ProcessingDecisions: decisionViews,
+		Snapshots:           snapshotViews,
+		Bags:                bagViews,
+		HistorySnapshots:    historySnapshotViews,
+		HistoryBags:         historyBagViews,
+		HistoryFrontiers:    historyFrontierViews,
 	}, nil
 }
 
@@ -328,22 +383,37 @@ func (b *runGraphBuilder) snapshotView(ctx context.Context, snapshot TaskSnapsho
 		return SnapshotView{}, err
 	}
 	return SnapshotView{
-		SnapshotID:         snapshot.SnapshotID,
-		RunID:              snapshot.RunID,
-		TaskID:             snapshot.TaskID,
-		PipelineInstanceID: snapshot.PipelineInstanceID,
-		TransitionID:       snapshot.TransitionID,
-		AgentRole:          snapshot.AgentRole,
-		AgentID:            snapshot.AgentID,
-		Op:                 snapshot.Op,
-		Result:             snapshot.Result,
-		InputBagIDs:        append([]string(nil), snapshot.InputBagIDs...),
-		OutputBagIDs:       append([]string(nil), snapshot.OutputBagIDs...),
-		InputBags:          inputBags,
-		OutputBags:         outputBags,
-		DiagnosticsJSON:    snapshot.DiagnosticsJSON,
-		RuntimeContextJSON: snapshot.RuntimeContextJSON,
-		CreatedAt:          snapshot.CreatedAt,
+		SnapshotID:                 snapshot.SnapshotID,
+		RunID:                      snapshot.RunID,
+		TaskID:                     snapshot.TaskID,
+		LogicalSnapshotID:          snapshot.LogicalSnapshotID,
+		SnapshotVersionID:          snapshot.SnapshotVersionID,
+		SnapshotVersionNo:          snapshot.SnapshotVersionNo,
+		ArrivalKind:                snapshot.ArrivalKind,
+		BranchKind:                 snapshot.BranchKind,
+		BranchFromSnapshotID:       snapshot.BranchFromSnapshotID,
+		RecoverFromSnapshotID:      snapshot.RecoverFromSnapshotID,
+		RecoverTargetSnapshotIDs:   append([]string(nil), snapshot.RecoverTargetSnapshotIDs...),
+		ReusableSnapshotIDs:        append([]string(nil), snapshot.ReusableSnapshotIDs...),
+		RecoverAnchorSnapshotIDs:   append([]string(nil), snapshot.RecoverAnchorSnapshotIDs...),
+		PreviousAttemptSnapshotIDs: append([]string(nil), snapshot.PreviousAttemptSnapshotIDs...),
+		FailureReportBagIDs:        append([]string(nil), snapshot.FailureReportBagIDs...),
+		PreviousOutputBagIDs:       append([]string(nil), snapshot.PreviousOutputBagIDs...),
+		RepairTargetTransitionID:   snapshot.RepairTargetTransitionID,
+		RepairTargetTaskID:         snapshot.RepairTargetTaskID,
+		PipelineInstanceID:         snapshot.PipelineInstanceID,
+		TransitionID:               snapshot.TransitionID,
+		AgentRole:                  snapshot.AgentRole,
+		AgentID:                    snapshot.AgentID,
+		Op:                         snapshot.Op,
+		Result:                     snapshot.Result,
+		InputBagIDs:                append([]string(nil), snapshot.InputBagIDs...),
+		OutputBagIDs:               append([]string(nil), snapshot.OutputBagIDs...),
+		InputBags:                  inputBags,
+		OutputBags:                 outputBags,
+		DiagnosticsJSON:            snapshot.DiagnosticsJSON,
+		RuntimeContextJSON:         snapshot.RuntimeContextJSON,
+		CreatedAt:                  snapshot.CreatedAt,
 	}, nil
 }
 
@@ -412,10 +482,11 @@ func (b *runGraphBuilder) versionView(ctx context.Context, version ArtifactVersi
 
 func refView(ref Ref) RefView {
 	return RefView{
-		RefName:             ref.RefName,
-		FrontierSnapshotID:  ref.FrontierSnapshotID,
-		FrontierSnapshotIDs: append([]string(nil), ref.FrontierSnapshotIDs...),
-		UpdatedAt:           ref.UpdatedAt,
+		RefName:                   ref.RefName,
+		FrontierSnapshotID:        ref.FrontierSnapshotID,
+		FrontierMemberSnapshotIDs: append([]string(nil), ref.FrontierMemberSnapshotIDs...),
+		FrontierSnapshotIDs:       append([]string(nil), ref.FrontierSnapshotIDs...),
+		UpdatedAt:                 ref.UpdatedAt,
 	}
 }
 
@@ -443,6 +514,37 @@ func refMoveEventView(event RefMoveEvent) RefMoveEventView {
 		Reason:                  event.Reason,
 		DetailsJSON:             event.DetailsJSON,
 		CreatedAt:               event.CreatedAt,
+	}
+}
+
+func snapshotProcessingDecisionView(decision SnapshotProcessingDecision) SnapshotProcessingDecisionView {
+	return SnapshotProcessingDecisionView{
+		DecisionID:                  decision.DecisionID,
+		RunID:                       decision.RunID,
+		RefName:                     decision.RefName,
+		SnapshotID:                  decision.SnapshotID,
+		SnapshotVersionID:           decision.SnapshotVersionID,
+		Status:                      decision.Status,
+		DecisionKind:                decision.DecisionKind,
+		ContinuationID:              decision.ContinuationID,
+		Reason:                      decision.Reason,
+		ProducedTaskIDs:             append([]string(nil), decision.ProducedTaskIDs...),
+		ProducedPipelineInstanceIDs: append([]string(nil), decision.ProducedPipelineInstanceIDs...),
+		ConsumedSnapshotIDs:         append([]string(nil), decision.ConsumedSnapshotIDs...),
+		ProducedSnapshotIDs:         append([]string(nil), decision.ProducedSnapshotIDs...),
+		FromFrontierSnapshotID:      decision.FromFrontierSnapshotID,
+		ToFrontierSnapshotID:        decision.ToFrontierSnapshotID,
+		RecoverTargetSnapshotIDs:    append([]string(nil), decision.RecoverTargetSnapshotIDs...),
+		ReusableSnapshotIDs:         append([]string(nil), decision.ReusableSnapshotIDs...),
+		RecoverAnchorSnapshotIDs:    append([]string(nil), decision.RecoverAnchorSnapshotIDs...),
+		FailedSnapshotID:            decision.FailedSnapshotID,
+		PreviousAttemptSnapshotIDs:  append([]string(nil), decision.PreviousAttemptSnapshotIDs...),
+		FailureReportBagIDs:         append([]string(nil), decision.FailureReportBagIDs...),
+		PreviousOutputBagIDs:        append([]string(nil), decision.PreviousOutputBagIDs...),
+		RepairTargetTransitionID:    decision.RepairTargetTransitionID,
+		RepairTargetTaskID:          decision.RepairTargetTaskID,
+		CreatedAt:                   decision.CreatedAt,
+		UpdatedAt:                   decision.UpdatedAt,
 	}
 }
 

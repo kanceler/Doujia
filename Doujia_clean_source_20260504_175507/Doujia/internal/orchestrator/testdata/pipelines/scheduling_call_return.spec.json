@@ -1,0 +1,118 @@
+{
+  "schema_version": "devflow.pipeline.registry/v0.4",
+  "registry_id": "scheduling_call_return_registry",
+  "entry_pipeline_id": "parent_call_return",
+  "pipeline_defs": [
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "child_write_code",
+      "kind": "subpipeline",
+      "name": "Child Write Code",
+      "namespace": {
+        "agents": [{"name": "coder", "role": "coder"}],
+        "bags": [{"name": "module_input"}, {"name": "code_bag"}]
+      },
+      "signature": {
+        "agents": [{"name": "coder", "role": "coder"}],
+        "input_bags": [{"name": "module_input"}],
+        "output_bags": [{"name": "code_bag"}]
+      },
+      "start_state": "child_ready",
+      "delivery_state": "child_done",
+      "states": [
+        {
+          "id": "child_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "next": {"type": "all", "transitions": ["write_code"]}
+        },
+        {
+          "id": "child_done",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "write_code"},
+          "exposes": {"bags": [{"name": "code_bag", "from_transition": "write_code"}]}
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_code",
+          "kind": "task",
+          "from_state": "child_ready",
+          "to_state": "child_done",
+          "agent": {"role": "coder", "alias": "coder"},
+          "op": "write_code",
+          "input_bags": [{"name": "module_input"}],
+          "output_bags": [{"name": "code_bag", "required": true}]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "parent_call_return",
+      "kind": "entry",
+      "name": "Parent Call Return",
+      "signature": {
+        "output_bags": [{"name": "test_report"}]
+      },
+      "namespace": {
+        "agents": [
+          {"name": "coder", "role": "coder", "default_agent_id": "coder01"},
+          {"name": "tester", "role": "tester", "default_agent_id": "tester01"}
+        ],
+        "bags": [
+          {"name": "module_input"},
+          {"name": "code_bag"},
+          {"name": "test_report"}
+        ]
+      },
+      "start_state": "module_ready",
+      "delivery_state": "tested",
+      "states": [
+        {
+          "id": "module_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "next": {"type": "all", "transitions": ["call_write_code"]}
+        },
+        {
+          "id": "code_returned",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "call_write_code"},
+          "exposes": {"bags": [{"name": "code_bag", "from_transition": "call_write_code"}]},
+          "next": {"type": "all", "transitions": ["test_code"]}
+        },
+        {
+          "id": "tested",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "test_code"},
+          "exposes": {"bags": [{"name": "test_report", "from_transition": "test_code"}]}
+        }
+      ],
+      "transitions": [
+        {
+          "id": "call_write_code",
+          "kind": "call",
+          "from_state": "module_ready",
+          "to_state": "code_returned",
+          "pipeline_id": "child_write_code",
+          "mode": "single",
+          "bindings": {
+            "agent_bindings": {"coder": "coder01"},
+            "input_bags": {"module_input": {"name": "module_input"}}
+          },
+          "output_bags": [{"name": "code_bag", "from_return": "code_bag"}]
+        },
+        {
+          "id": "test_code",
+          "kind": "task",
+          "from_state": "code_returned",
+          "to_state": "tested",
+          "agent": {"role": "tester", "alias": "tester"},
+          "op": "test_code",
+          "input_bags": [{"name": "code_bag", "from_state": "code_returned"}],
+          "output_bags": [{"name": "test_report", "required": true}]
+        }
+      ]
+    }
+  ]
+}

@@ -67,13 +67,28 @@ func TestRunArchiveZipExportImportRewritesRunScopedIDsAndArtifacts(t *testing.T)
 	}
 	snapshotID := StableSnapshotID(sourceRunID, "task_02", now.Add(time.Second))
 	if err := sourceRepository.CreateSnapshot(ctx, TaskSnapshot{
-		SnapshotID:      snapshotID,
-		RunID:           sourceRunID,
-		TaskID:          "task_02",
-		Result:          core.TaskResultCodeOK,
-		OutputBagIDs:    []string{bagID},
-		DiagnosticsJSON: `{"bag":"` + bagID + `"}`,
-		CreatedAt:       now.Add(time.Second),
+		SnapshotID:                 snapshotID,
+		RunID:                      sourceRunID,
+		TaskID:                     "task_02",
+		LogicalSnapshotID:          "logical_task_02",
+		SnapshotVersionID:          snapshotID + ":v1",
+		SnapshotVersionNo:          1,
+		ArrivalKind:                RefMoveModeAdvance,
+		BranchKind:                 RefMoveModeRecover,
+		BranchFromSnapshotID:       snapshotID,
+		RecoverFromSnapshotID:      snapshotID,
+		RecoverTargetSnapshotIDs:   []string{snapshotID},
+		ReusableSnapshotIDs:        []string{snapshotID},
+		RecoverAnchorSnapshotIDs:   []string{snapshotID},
+		PreviousAttemptSnapshotIDs: []string{snapshotID},
+		FailureReportBagIDs:        []string{bagID},
+		PreviousOutputBagIDs:       []string{bagID},
+		RepairTargetTransitionID:   "write_code",
+		RepairTargetTaskID:         "task_02",
+		Result:                     core.TaskResultCodeOK,
+		OutputBagIDs:               []string{bagID},
+		DiagnosticsJSON:            `{"bag":"` + bagID + `"}`,
+		CreatedAt:                  now.Add(time.Second),
 	}); err != nil {
 		t.Fatalf("CreateSnapshot() error = %v", err)
 	}
@@ -89,11 +104,11 @@ func TestRunArchiveZipExportImportRewritesRunScopedIDsAndArtifacts(t *testing.T)
 		t.Fatalf("CreateFrontierSnapshot() error = %v", err)
 	}
 	if err := sourceRepository.UpdateRef(ctx, Ref{
-		RefName:             DefaultRefName,
-		RunID:               sourceRunID,
-		FrontierSnapshotID:  frontierID,
-		FrontierSnapshotIDs: []string{snapshotID},
-		UpdatedAt:           now.Add(3 * time.Second),
+		RefName:                   DefaultRefName,
+		RunID:                     sourceRunID,
+		FrontierSnapshotID:        frontierID,
+		FrontierMemberSnapshotIDs: []string{snapshotID},
+		UpdatedAt:                 now.Add(3 * time.Second),
 	}); err != nil {
 		t.Fatalf("UpdateRef() error = %v", err)
 	}
@@ -108,6 +123,34 @@ func TestRunArchiveZipExportImportRewritesRunScopedIDsAndArtifacts(t *testing.T)
 		CreatedAt:             now.Add(4 * time.Second),
 	}); err != nil {
 		t.Fatalf("CreateRefMoveEvent() error = %v", err)
+	}
+	if err := sourceRepository.CreateSnapshotProcessingDecision(ctx, SnapshotProcessingDecision{
+		RunID:                      sourceRunID,
+		RefName:                    DefaultRefName,
+		SnapshotID:                 snapshotID,
+		SnapshotVersionID:          snapshotID + ":v1",
+		Status:                     SnapshotProcessingStatusAdvanced,
+		DecisionKind:               RefMoveModeAdvance,
+		ContinuationID:             "task_03",
+		Reason:                     "processed " + snapshotID,
+		ProducedTaskIDs:            []string{"task_03"},
+		ConsumedSnapshotIDs:        []string{snapshotID},
+		ProducedSnapshotIDs:        []string{snapshotID},
+		FromFrontierSnapshotID:     frontierID,
+		ToFrontierSnapshotID:       frontierID,
+		RecoverTargetSnapshotIDs:   []string{snapshotID},
+		ReusableSnapshotIDs:        []string{snapshotID},
+		RecoverAnchorSnapshotIDs:   []string{snapshotID},
+		FailedSnapshotID:           snapshotID,
+		PreviousAttemptSnapshotIDs: []string{snapshotID},
+		FailureReportBagIDs:        []string{bagID},
+		PreviousOutputBagIDs:       []string{bagID},
+		RepairTargetTransitionID:   "write_code",
+		RepairTargetTaskID:         "task_02",
+		CreatedAt:                  now.Add(4500 * time.Millisecond),
+		UpdatedAt:                  now.Add(4500 * time.Millisecond),
+	}); err != nil {
+		t.Fatalf("CreateSnapshotProcessingDecision() error = %v", err)
 	}
 
 	archivePath := filepath.Join(t.TempDir(), "run_archive.zip")
@@ -144,6 +187,56 @@ func TestRunArchiveZipExportImportRewritesRunScopedIDsAndArtifacts(t *testing.T)
 	}
 	if len(graph.Snapshots) != 1 || graph.Snapshots[0].SnapshotID == snapshotID {
 		t.Fatalf("imported snapshots = %+v, want one remapped snapshot", graph.Snapshots)
+	}
+	if graph.Snapshots[0].SnapshotVersionID == snapshotID+":v1" || !strings.Contains(graph.Snapshots[0].SnapshotVersionID, graph.Snapshots[0].SnapshotID) {
+		t.Fatalf("imported snapshot version id = %q, want remapped id derived from %q", graph.Snapshots[0].SnapshotVersionID, graph.Snapshots[0].SnapshotID)
+	}
+	if graph.Snapshots[0].LogicalSnapshotID != "logical_task_02" ||
+		graph.Snapshots[0].SnapshotVersionNo != 1 ||
+		graph.Snapshots[0].ArrivalKind != RefMoveModeAdvance {
+		t.Fatalf("imported snapshot phase fields = %+v", graph.Snapshots[0])
+	}
+	if graph.Snapshots[0].BranchKind != RefMoveModeRecover ||
+		graph.Snapshots[0].BranchFromSnapshotID != graph.Snapshots[0].SnapshotID ||
+		graph.Snapshots[0].RecoverFromSnapshotID != graph.Snapshots[0].SnapshotID ||
+		!reflect.DeepEqual(graph.Snapshots[0].RecoverTargetSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(graph.Snapshots[0].ReusableSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(graph.Snapshots[0].RecoverAnchorSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(graph.Snapshots[0].PreviousAttemptSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(graph.Snapshots[0].FailureReportBagIDs, []string{graph.Bags[0].BagID}) ||
+		!reflect.DeepEqual(graph.Snapshots[0].PreviousOutputBagIDs, []string{graph.Bags[0].BagID}) ||
+		graph.Snapshots[0].RepairTargetTransitionID != "write_code" ||
+		graph.Snapshots[0].RepairTargetTaskID != "task_02" {
+		t.Fatalf("imported snapshot repair metadata = %+v", graph.Snapshots[0])
+	}
+	if len(graph.Ref.FrontierMemberSnapshotIDs) != 1 ||
+		graph.Ref.FrontierMemberSnapshotIDs[0] != graph.Snapshots[0].SnapshotID ||
+		graph.Ref.FrontierSnapshotIDs[0] != graph.Snapshots[0].SnapshotID {
+		t.Fatalf("imported ref members = %+v, snapshot = %s", graph.Ref, graph.Snapshots[0].SnapshotID)
+	}
+	if len(graph.ProcessingDecisions) != 1 {
+		t.Fatalf("processing decisions = %+v, want one imported decision", graph.ProcessingDecisions)
+	}
+	decision := graph.ProcessingDecisions[0]
+	if decision.SnapshotID != graph.Snapshots[0].SnapshotID ||
+		decision.SnapshotVersionID != graph.Snapshots[0].SnapshotVersionID ||
+		decision.Status != SnapshotProcessingStatusAdvanced ||
+		!reflect.DeepEqual(decision.ProducedTaskIDs, []string{"task_03"}) ||
+		!reflect.DeepEqual(decision.ConsumedSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(decision.ProducedSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		decision.FromFrontierSnapshotID == frontierID ||
+		decision.ToFrontierSnapshotID == frontierID ||
+		!reflect.DeepEqual(decision.RecoverTargetSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(decision.ReusableSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(decision.RecoverAnchorSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		decision.FailedSnapshotID != graph.Snapshots[0].SnapshotID ||
+		!reflect.DeepEqual(decision.PreviousAttemptSnapshotIDs, []string{graph.Snapshots[0].SnapshotID}) ||
+		!reflect.DeepEqual(decision.FailureReportBagIDs, []string{graph.Bags[0].BagID}) ||
+		!reflect.DeepEqual(decision.PreviousOutputBagIDs, []string{graph.Bags[0].BagID}) ||
+		decision.RepairTargetTransitionID != "write_code" ||
+		decision.RepairTargetTaskID != "task_02" ||
+		strings.Contains(decision.Reason, snapshotID) {
+		t.Fatalf("imported processing decision = %+v, snapshot = %+v", decision, graph.Snapshots[0])
 	}
 	if len(graph.Bags) != 1 || graph.Bags[0].BagID == bagID {
 		t.Fatalf("imported bags = %+v, want one remapped bag", graph.Bags)

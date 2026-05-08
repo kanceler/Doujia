@@ -30,6 +30,9 @@ func (r *SQLiteRepository) Migrate(ctx context.Context) error {
 	if err := r.ensureColumn(ctx, "refs", "frontier_snapshot_id", "frontier_snapshot_id TEXT"); err != nil {
 		return err
 	}
+	if err := r.ensureColumn(ctx, "refs", "frontier_member_snapshot_ids_json", "frontier_member_snapshot_ids_json TEXT"); err != nil {
+		return err
+	}
 	if err := r.ensureColumn(ctx, "frontier_snapshots", "details_json", "details_json TEXT"); err != nil {
 		return err
 	}
@@ -41,6 +44,21 @@ func (r *SQLiteRepository) Migrate(ctx context.Context) error {
 		definition string
 	}{
 		{name: "pipeline_instance_id", definition: "pipeline_instance_id TEXT"},
+		{name: "logical_snapshot_id", definition: "logical_snapshot_id TEXT"},
+		{name: "snapshot_version_id", definition: "snapshot_version_id TEXT"},
+		{name: "snapshot_version_no", definition: "snapshot_version_no INTEGER NOT NULL DEFAULT 0"},
+		{name: "arrival_kind", definition: "arrival_kind TEXT"},
+		{name: "branch_kind", definition: "branch_kind TEXT"},
+		{name: "branch_from_snapshot_id", definition: "branch_from_snapshot_id TEXT"},
+		{name: "recover_from_snapshot_id", definition: "recover_from_snapshot_id TEXT"},
+		{name: "recover_target_snapshot_ids_json", definition: "recover_target_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "reusable_snapshot_ids_json", definition: "reusable_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "recover_anchor_snapshot_ids_json", definition: "recover_anchor_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "previous_attempt_snapshot_ids_json", definition: "previous_attempt_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "failure_report_bag_ids_json", definition: "failure_report_bag_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "previous_output_bag_ids_json", definition: "previous_output_bag_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "repair_target_transition_id", definition: "repair_target_transition_id TEXT"},
+		{name: "repair_target_task_id", definition: "repair_target_task_id TEXT"},
 		{name: "transition_id", definition: "transition_id TEXT"},
 		{name: "agent_role", definition: "agent_role TEXT"},
 		{name: "agent_id", definition: "agent_id TEXT"},
@@ -48,6 +66,28 @@ func (r *SQLiteRepository) Migrate(ctx context.Context) error {
 		{name: "runtime_context_json", definition: "runtime_context_json TEXT"},
 	} {
 		if err := r.ensureColumn(ctx, "task_snapshots", column.name, column.definition); err != nil {
+			return err
+		}
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "consumed_snapshot_ids_json", definition: "consumed_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "produced_snapshot_ids_json", definition: "produced_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "from_frontier_snapshot_id", definition: "from_frontier_snapshot_id TEXT NOT NULL DEFAULT ''"},
+		{name: "to_frontier_snapshot_id", definition: "to_frontier_snapshot_id TEXT NOT NULL DEFAULT ''"},
+		{name: "recover_target_snapshot_ids_json", definition: "recover_target_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "reusable_snapshot_ids_json", definition: "reusable_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "recover_anchor_snapshot_ids_json", definition: "recover_anchor_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "failed_snapshot_id", definition: "failed_snapshot_id TEXT NOT NULL DEFAULT ''"},
+		{name: "previous_attempt_snapshot_ids_json", definition: "previous_attempt_snapshot_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "failure_report_bag_ids_json", definition: "failure_report_bag_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "previous_output_bag_ids_json", definition: "previous_output_bag_ids_json TEXT NOT NULL DEFAULT '[]'"},
+		{name: "repair_target_transition_id", definition: "repair_target_transition_id TEXT NOT NULL DEFAULT ''"},
+		{name: "repair_target_task_id", definition: "repair_target_task_id TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := r.ensureColumn(ctx, "snapshot_processing_decisions", column.name, column.definition); err != nil {
 			return err
 		}
 	}
@@ -265,13 +305,47 @@ func (r *SQLiteRepository) CreateSnapshot(ctx context.Context, snapshot TaskSnap
 	if err != nil {
 		return err
 	}
+	recoverTargetSnapshotIDsJSON, err := marshalStringSlice(snapshot.RecoverTargetSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	reusableSnapshotIDsJSON, err := marshalStringSlice(snapshot.ReusableSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	recoverAnchorSnapshotIDsJSON, err := marshalStringSlice(snapshot.RecoverAnchorSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	previousAttemptSnapshotIDsJSON, err := marshalStringSlice(snapshot.PreviousAttemptSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	failureReportBagIDsJSON, err := marshalStringSlice(snapshot.FailureReportBagIDs)
+	if err != nil {
+		return err
+	}
+	previousOutputBagIDsJSON, err := marshalStringSlice(snapshot.PreviousOutputBagIDs)
+	if err != nil {
+		return err
+	}
 	_, err = r.db.ExecContext(ctx, `
 INSERT INTO task_snapshots (
-  snapshot_id, run_id, task_id, pipeline_instance_id, transition_id, agent_role, agent_id, op,
+  snapshot_id, run_id, task_id, logical_snapshot_id, snapshot_version_id, snapshot_version_no,
+  arrival_kind, branch_kind, branch_from_snapshot_id, recover_from_snapshot_id,
+  recover_target_snapshot_ids_json, reusable_snapshot_ids_json, recover_anchor_snapshot_ids_json,
+  previous_attempt_snapshot_ids_json, failure_report_bag_ids_json, previous_output_bag_ids_json,
+  repair_target_transition_id, repair_target_task_id,
+  pipeline_instance_id, transition_id, agent_role, agent_id, op,
   result, input_bag_ids_json, output_bag_ids_json, diagnostics_json, runtime_context_json,
   created_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snapshot.SnapshotID, snapshot.RunID, snapshot.TaskID,
+		nullString(snapshot.LogicalSnapshotID), nullString(snapshot.SnapshotVersionID), snapshot.SnapshotVersionNo,
+		nullString(snapshot.ArrivalKind), nullString(snapshot.BranchKind), nullString(snapshot.BranchFromSnapshotID),
+		nullString(snapshot.RecoverFromSnapshotID), recoverTargetSnapshotIDsJSON, reusableSnapshotIDsJSON,
+		recoverAnchorSnapshotIDsJSON, previousAttemptSnapshotIDsJSON, failureReportBagIDsJSON,
+		previousOutputBagIDsJSON, nullString(snapshot.RepairTargetTransitionID), nullString(snapshot.RepairTargetTaskID),
 		nullString(string(snapshot.PipelineInstanceID)), nullString(string(snapshot.TransitionID)),
 		nullString(string(snapshot.AgentRole)), nullString(string(snapshot.AgentID)), nullString(snapshot.Op),
 		snapshot.Result, inputBagIDsJSON, outputBagIDsJSON, nullString(snapshot.DiagnosticsJSON), nullString(snapshot.RuntimeContextJSON),
@@ -283,6 +357,11 @@ INSERT INTO task_snapshots (
 func (r *SQLiteRepository) GetSnapshot(ctx context.Context, snapshotID string) (TaskSnapshot, error) {
 	row := r.db.QueryRowContext(ctx, `
 SELECT snapshot_id, run_id, task_id, pipeline_instance_id, transition_id, agent_role, agent_id, op,
+       logical_snapshot_id, snapshot_version_id, snapshot_version_no, arrival_kind,
+       branch_kind, branch_from_snapshot_id, recover_from_snapshot_id,
+       recover_target_snapshot_ids_json, reusable_snapshot_ids_json, recover_anchor_snapshot_ids_json,
+       previous_attempt_snapshot_ids_json, failure_report_bag_ids_json, previous_output_bag_ids_json,
+       repair_target_transition_id, repair_target_task_id,
        result, input_bag_ids_json, output_bag_ids_json, diagnostics_json, runtime_context_json,
        created_at
 FROM task_snapshots WHERE snapshot_id = ?`, strings.TrimSpace(snapshotID))
@@ -292,6 +371,11 @@ FROM task_snapshots WHERE snapshot_id = ?`, strings.TrimSpace(snapshotID))
 func (r *SQLiteRepository) ListSnapshotsByRun(ctx context.Context, runID core.RunID) ([]TaskSnapshot, error) {
 	rows, err := r.db.QueryContext(ctx, `
 SELECT snapshot_id, run_id, task_id, pipeline_instance_id, transition_id, agent_role, agent_id, op,
+       logical_snapshot_id, snapshot_version_id, snapshot_version_no, arrival_kind,
+       branch_kind, branch_from_snapshot_id, recover_from_snapshot_id,
+       recover_target_snapshot_ids_json, reusable_snapshot_ids_json, recover_anchor_snapshot_ids_json,
+       previous_attempt_snapshot_ids_json, failure_report_bag_ids_json, previous_output_bag_ids_json,
+       repair_target_transition_id, repair_target_task_id,
        result, input_bag_ids_json, output_bag_ids_json, diagnostics_json, runtime_context_json,
        created_at
 FROM task_snapshots
@@ -455,14 +539,19 @@ func (r *SQLiteRepository) UpdateRef(ctx context.Context, ref Ref) error {
 	if err != nil {
 		return err
 	}
+	frontierMemberJSON, err := marshalStringSlice(ref.FrontierMemberSnapshotIDs)
+	if err != nil {
+		return err
+	}
 	_, err = r.db.ExecContext(ctx, `
-INSERT INTO refs (ref_name, run_id, frontier_snapshot_id, frontier_snapshot_ids_json, updated_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO refs (ref_name, run_id, frontier_snapshot_id, frontier_member_snapshot_ids_json, frontier_snapshot_ids_json, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(ref_name, run_id) DO UPDATE SET
   frontier_snapshot_id = excluded.frontier_snapshot_id,
+  frontier_member_snapshot_ids_json = excluded.frontier_member_snapshot_ids_json,
   frontier_snapshot_ids_json = excluded.frontier_snapshot_ids_json,
   updated_at = excluded.updated_at`,
-		ref.RefName, ref.RunID, nullString(ref.FrontierSnapshotID), frontierJSON, formatTime(ref.UpdatedAt),
+		ref.RefName, ref.RunID, nullString(ref.FrontierSnapshotID), frontierMemberJSON, frontierJSON, formatTime(ref.UpdatedAt),
 	)
 	return err
 }
@@ -508,6 +597,10 @@ func (r *SQLiteRepository) MoveRef(ctx context.Context, req MoveRefRequest) (Ref
 	if err != nil {
 		return Ref{}, RefMoveEvent{}, err
 	}
+	frontierMemberJSON, err := marshalStringSlice(ref.FrontierMemberSnapshotIDs)
+	if err != nil {
+		return Ref{}, RefMoveEvent{}, err
+	}
 	fromJSON, err := marshalStringSlice(event.FromFrontierSnapshotIDs)
 	if err != nil {
 		return Ref{}, RefMoveEvent{}, err
@@ -540,13 +633,14 @@ WHERE run_id = ? AND ref_name = ?`, ref.RunID, ref.RefName).Scan(&current)
 			ErrRefCASConflict, ref.RefName, ref.RunID, req.ExpectedFrontierSnapshotID, currentID)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO refs (ref_name, run_id, frontier_snapshot_id, frontier_snapshot_ids_json, updated_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO refs (ref_name, run_id, frontier_snapshot_id, frontier_member_snapshot_ids_json, frontier_snapshot_ids_json, updated_at)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(ref_name, run_id) DO UPDATE SET
   frontier_snapshot_id = excluded.frontier_snapshot_id,
+  frontier_member_snapshot_ids_json = excluded.frontier_member_snapshot_ids_json,
   frontier_snapshot_ids_json = excluded.frontier_snapshot_ids_json,
   updated_at = excluded.updated_at`,
-		ref.RefName, ref.RunID, nullString(ref.FrontierSnapshotID), frontierJSON, formatTime(ref.UpdatedAt),
+		ref.RefName, ref.RunID, nullString(ref.FrontierSnapshotID), frontierMemberJSON, frontierJSON, formatTime(ref.UpdatedAt),
 	); err != nil {
 		return Ref{}, RefMoveEvent{}, err
 	}
@@ -571,14 +665,14 @@ func (r *SQLiteRepository) GetRef(ctx context.Context, runID core.RunID, refName
 		refName = DefaultRefName
 	}
 	row := r.db.QueryRowContext(ctx, `
-SELECT ref_name, run_id, frontier_snapshot_id, frontier_snapshot_ids_json, updated_at
+SELECT ref_name, run_id, frontier_snapshot_id, frontier_member_snapshot_ids_json, frontier_snapshot_ids_json, updated_at
 FROM refs WHERE run_id = ? AND ref_name = ?`, runID, strings.TrimSpace(refName))
 	return scanRef(row)
 }
 
 func (r *SQLiteRepository) ListRefsByRun(ctx context.Context, runID core.RunID) ([]Ref, error) {
 	rows, err := r.db.QueryContext(ctx, `
-SELECT ref_name, run_id, frontier_snapshot_id, frontier_snapshot_ids_json, updated_at
+SELECT ref_name, run_id, frontier_snapshot_id, frontier_member_snapshot_ids_json, frontier_snapshot_ids_json, updated_at
 FROM refs
 WHERE run_id = ?
 ORDER BY updated_at DESC, ref_name ASC`, runID)
@@ -653,6 +747,134 @@ ORDER BY created_at ASC, event_id ASC`, runID, strings.TrimSpace(refName))
 	items := make([]RefMoveEvent, 0)
 	for rows.Next() {
 		item, err := scanRefMoveEvent(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+func (r *SQLiteRepository) CreateSnapshotProcessingDecision(ctx context.Context, decision SnapshotProcessingDecision) error {
+	decision, err := normalizeSnapshotProcessingDecision(decision)
+	if err != nil {
+		return err
+	}
+	if err := r.requireSnapshot(ctx, decision.SnapshotID); err != nil {
+		return err
+	}
+	producedTaskIDsJSON, err := marshalStringSlice(decision.ProducedTaskIDs)
+	if err != nil {
+		return err
+	}
+	producedInstanceIDsJSON, err := marshalStringSlice(decision.ProducedPipelineInstanceIDs)
+	if err != nil {
+		return err
+	}
+	consumedSnapshotIDsJSON, err := marshalStringSlice(decision.ConsumedSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	producedSnapshotIDsJSON, err := marshalStringSlice(decision.ProducedSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	recoverTargetSnapshotIDsJSON, err := marshalStringSlice(decision.RecoverTargetSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	reusableSnapshotIDsJSON, err := marshalStringSlice(decision.ReusableSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	recoverAnchorSnapshotIDsJSON, err := marshalStringSlice(decision.RecoverAnchorSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	previousAttemptSnapshotIDsJSON, err := marshalStringSlice(decision.PreviousAttemptSnapshotIDs)
+	if err != nil {
+		return err
+	}
+	failureReportBagIDsJSON, err := marshalStringSlice(decision.FailureReportBagIDs)
+	if err != nil {
+		return err
+	}
+	previousOutputBagIDsJSON, err := marshalStringSlice(decision.PreviousOutputBagIDs)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.ExecContext(ctx, `
+INSERT INTO snapshot_processing_decisions (
+  decision_id, run_id, ref_name, snapshot_id, snapshot_version_id, status,
+  decision_kind, continuation_id, reason, produced_task_ids_json,
+  produced_pipeline_instance_ids_json, consumed_snapshot_ids_json,
+  produced_snapshot_ids_json, from_frontier_snapshot_id, to_frontier_snapshot_id,
+  recover_target_snapshot_ids_json, reusable_snapshot_ids_json,
+  recover_anchor_snapshot_ids_json, failed_snapshot_id,
+  previous_attempt_snapshot_ids_json, failure_report_bag_ids_json,
+  previous_output_bag_ids_json, repair_target_transition_id, repair_target_task_id,
+  created_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		decision.DecisionID, decision.RunID, decision.RefName, decision.SnapshotID,
+		nullString(decision.SnapshotVersionID), decision.Status, nullString(decision.DecisionKind),
+		nullString(decision.ContinuationID), nullString(decision.Reason), producedTaskIDsJSON,
+		producedInstanceIDsJSON, consumedSnapshotIDsJSON, producedSnapshotIDsJSON,
+		decision.FromFrontierSnapshotID, decision.ToFrontierSnapshotID, recoverTargetSnapshotIDsJSON,
+		reusableSnapshotIDsJSON, recoverAnchorSnapshotIDsJSON, decision.FailedSnapshotID,
+		previousAttemptSnapshotIDsJSON, failureReportBagIDsJSON, previousOutputBagIDsJSON,
+		decision.RepairTargetTransitionID, decision.RepairTargetTaskID,
+		formatTime(decision.CreatedAt), formatTime(decision.UpdatedAt),
+	)
+	return err
+}
+
+func (r *SQLiteRepository) GetSnapshotProcessingDecision(ctx context.Context, runID core.RunID, refName string, snapshotID string) (SnapshotProcessingDecision, error) {
+	if strings.TrimSpace(refName) == "" {
+		refName = DefaultRefName
+	}
+	row := r.db.QueryRowContext(ctx, `
+SELECT decision_id, run_id, ref_name, snapshot_id, snapshot_version_id, status,
+       decision_kind, continuation_id, reason, produced_task_ids_json,
+       produced_pipeline_instance_ids_json, consumed_snapshot_ids_json,
+       produced_snapshot_ids_json, from_frontier_snapshot_id, to_frontier_snapshot_id,
+       recover_target_snapshot_ids_json, reusable_snapshot_ids_json,
+       recover_anchor_snapshot_ids_json, failed_snapshot_id,
+       previous_attempt_snapshot_ids_json, failure_report_bag_ids_json,
+       previous_output_bag_ids_json, repair_target_transition_id, repair_target_task_id,
+       created_at, updated_at
+FROM snapshot_processing_decisions
+WHERE run_id = ? AND ref_name = ? AND snapshot_id = ?`, runID, strings.TrimSpace(refName), strings.TrimSpace(snapshotID))
+	return scanSnapshotProcessingDecision(row)
+}
+
+func (r *SQLiteRepository) ListSnapshotProcessingDecisions(ctx context.Context, runID core.RunID, refName string) ([]SnapshotProcessingDecision, error) {
+	if strings.TrimSpace(refName) == "" {
+		refName = DefaultRefName
+	}
+	rows, err := r.db.QueryContext(ctx, `
+SELECT decision_id, run_id, ref_name, snapshot_id, snapshot_version_id, status,
+       decision_kind, continuation_id, reason, produced_task_ids_json,
+       produced_pipeline_instance_ids_json, consumed_snapshot_ids_json,
+       produced_snapshot_ids_json, from_frontier_snapshot_id, to_frontier_snapshot_id,
+       recover_target_snapshot_ids_json, reusable_snapshot_ids_json,
+       recover_anchor_snapshot_ids_json, failed_snapshot_id,
+       previous_attempt_snapshot_ids_json, failure_report_bag_ids_json,
+       previous_output_bag_ids_json, repair_target_transition_id, repair_target_task_id,
+       created_at, updated_at
+FROM snapshot_processing_decisions
+WHERE run_id = ? AND ref_name = ?
+ORDER BY created_at ASC, decision_id ASC`, runID, strings.TrimSpace(refName))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]SnapshotProcessingDecision, 0)
+	for rows.Next() {
+		item, err := scanSnapshotProcessingDecision(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -830,14 +1052,48 @@ func scanSnapshot(row rowScanner) (TaskSnapshot, error) {
 	var snapshot TaskSnapshot
 	var inputBagIDsJSON, outputBagIDsJSON string
 	var pipelineInstanceID, transitionID, agentRole, agentID, op, diagnostics, runtimeContext sql.NullString
+	var logicalSnapshotID, snapshotVersionID, arrivalKind sql.NullString
+	var branchKind, branchFromSnapshotID, recoverFromSnapshotID sql.NullString
+	var recoverTargetSnapshotIDsJSON, reusableSnapshotIDsJSON, recoverAnchorSnapshotIDsJSON string
+	var previousAttemptSnapshotIDsJSON, failureReportBagIDsJSON, previousOutputBagIDsJSON string
+	var repairTargetTransitionID, repairTargetTaskID sql.NullString
 	var createdAt string
 	if err := row.Scan(
 		&snapshot.SnapshotID, &snapshot.RunID, &snapshot.TaskID,
 		&pipelineInstanceID, &transitionID, &agentRole, &agentID, &op,
+		&logicalSnapshotID, &snapshotVersionID, &snapshot.SnapshotVersionNo, &arrivalKind,
+		&branchKind, &branchFromSnapshotID, &recoverFromSnapshotID,
+		&recoverTargetSnapshotIDsJSON, &reusableSnapshotIDsJSON, &recoverAnchorSnapshotIDsJSON,
+		&previousAttemptSnapshotIDsJSON, &failureReportBagIDsJSON, &previousOutputBagIDsJSON,
+		&repairTargetTransitionID, &repairTargetTaskID,
 		&snapshot.Result, &inputBagIDsJSON, &outputBagIDsJSON, &diagnostics, &runtimeContext,
 		&createdAt,
 	); err != nil {
 		return TaskSnapshot{}, err
+	}
+	if logicalSnapshotID.Valid {
+		snapshot.LogicalSnapshotID = logicalSnapshotID.String
+	}
+	if snapshotVersionID.Valid {
+		snapshot.SnapshotVersionID = snapshotVersionID.String
+	}
+	if arrivalKind.Valid {
+		snapshot.ArrivalKind = arrivalKind.String
+	}
+	if branchKind.Valid {
+		snapshot.BranchKind = branchKind.String
+	}
+	if branchFromSnapshotID.Valid {
+		snapshot.BranchFromSnapshotID = branchFromSnapshotID.String
+	}
+	if recoverFromSnapshotID.Valid {
+		snapshot.RecoverFromSnapshotID = recoverFromSnapshotID.String
+	}
+	if repairTargetTransitionID.Valid {
+		snapshot.RepairTargetTransitionID = repairTargetTransitionID.String
+	}
+	if repairTargetTaskID.Valid {
+		snapshot.RepairTargetTaskID = repairTargetTaskID.String
 	}
 	if pipelineInstanceID.Valid {
 		snapshot.PipelineInstanceID = core.PipelineInstanceID(pipelineInstanceID.String)
@@ -859,6 +1115,24 @@ func scanSnapshot(row rowScanner) (TaskSnapshot, error) {
 	}
 	if err := json.Unmarshal([]byte(outputBagIDsJSON), &snapshot.OutputBagIDs); err != nil {
 		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot output bag ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(recoverTargetSnapshotIDsJSON), &snapshot.RecoverTargetSnapshotIDs); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot recover target snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(reusableSnapshotIDsJSON), &snapshot.ReusableSnapshotIDs); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot reusable snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(recoverAnchorSnapshotIDsJSON), &snapshot.RecoverAnchorSnapshotIDs); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot recover anchor snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(previousAttemptSnapshotIDsJSON), &snapshot.PreviousAttemptSnapshotIDs); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot previous attempt snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(failureReportBagIDsJSON), &snapshot.FailureReportBagIDs); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot failure report bag ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(previousOutputBagIDsJSON), &snapshot.PreviousOutputBagIDs); err != nil {
+		return TaskSnapshot{}, fmt.Errorf("unmarshal snapshot previous output bag ids: %w", err)
 	}
 	if diagnostics.Valid {
 		snapshot.DiagnosticsJSON = diagnostics.String
@@ -911,17 +1185,29 @@ func scanFrontierSnapshot(row rowScanner) (FrontierSnapshot, error) {
 func scanRef(row rowScanner) (Ref, error) {
 	var ref Ref
 	var frontierSnapshotID sql.NullString
-	var frontierJSON string
+	var frontierMemberJSON, frontierJSON sql.NullString
 	var updatedAt string
-	if err := row.Scan(&ref.RefName, &ref.RunID, &frontierSnapshotID, &frontierJSON, &updatedAt); err != nil {
+	if err := row.Scan(&ref.RefName, &ref.RunID, &frontierSnapshotID, &frontierMemberJSON, &frontierJSON, &updatedAt); err != nil {
 		return Ref{}, err
 	}
 	if frontierSnapshotID.Valid {
 		ref.FrontierSnapshotID = frontierSnapshotID.String
 	}
-	if err := json.Unmarshal([]byte(frontierJSON), &ref.FrontierSnapshotIDs); err != nil {
+	if frontierMemberJSON.Valid && strings.TrimSpace(frontierMemberJSON.String) != "" {
+		if err := json.Unmarshal([]byte(frontierMemberJSON.String), &ref.FrontierMemberSnapshotIDs); err != nil {
+			return Ref{}, fmt.Errorf("unmarshal ref frontier member snapshot ids: %w", err)
+		}
+	}
+	if frontierJSON.Valid && strings.TrimSpace(frontierJSON.String) != "" {
+		if err := json.Unmarshal([]byte(frontierJSON.String), &ref.FrontierSnapshotIDs); err != nil {
+			return Ref{}, fmt.Errorf("unmarshal ref frontier snapshot ids: %w", err)
+		}
+	}
+	normalized, err := normalizeRef(ref)
+	if err != nil {
 		return Ref{}, fmt.Errorf("unmarshal ref frontier snapshot ids: %w", err)
 	}
+	ref = normalized
 	parsed, err := parseTime(updatedAt)
 	if err != nil {
 		return Ref{}, err
@@ -959,6 +1245,81 @@ func scanRefMoveEvent(row rowScanner) (RefMoveEvent, error) {
 	}
 	event.CreatedAt = parsed
 	return event, nil
+}
+
+func scanSnapshotProcessingDecision(row rowScanner) (SnapshotProcessingDecision, error) {
+	var decision SnapshotProcessingDecision
+	var snapshotVersionID, decisionKind, continuationID, reason sql.NullString
+	var producedTaskIDsJSON, producedInstanceIDsJSON string
+	var consumedSnapshotIDsJSON, producedSnapshotIDsJSON string
+	var recoverTargetSnapshotIDsJSON, reusableSnapshotIDsJSON, recoverAnchorSnapshotIDsJSON string
+	var previousAttemptSnapshotIDsJSON, failureReportBagIDsJSON, previousOutputBagIDsJSON string
+	var createdAt, updatedAt string
+	if err := row.Scan(
+		&decision.DecisionID, &decision.RunID, &decision.RefName, &decision.SnapshotID,
+		&snapshotVersionID, &decision.Status, &decisionKind, &continuationID, &reason,
+		&producedTaskIDsJSON, &producedInstanceIDsJSON, &consumedSnapshotIDsJSON,
+		&producedSnapshotIDsJSON, &decision.FromFrontierSnapshotID, &decision.ToFrontierSnapshotID,
+		&recoverTargetSnapshotIDsJSON, &reusableSnapshotIDsJSON, &recoverAnchorSnapshotIDsJSON,
+		&decision.FailedSnapshotID, &previousAttemptSnapshotIDsJSON, &failureReportBagIDsJSON,
+		&previousOutputBagIDsJSON, &decision.RepairTargetTransitionID, &decision.RepairTargetTaskID,
+		&createdAt, &updatedAt,
+	); err != nil {
+		return SnapshotProcessingDecision{}, err
+	}
+	if snapshotVersionID.Valid {
+		decision.SnapshotVersionID = snapshotVersionID.String
+	}
+	if decisionKind.Valid {
+		decision.DecisionKind = decisionKind.String
+	}
+	if continuationID.Valid {
+		decision.ContinuationID = continuationID.String
+	}
+	if reason.Valid {
+		decision.Reason = reason.String
+	}
+	if err := json.Unmarshal([]byte(producedTaskIDsJSON), &decision.ProducedTaskIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing produced task ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(producedInstanceIDsJSON), &decision.ProducedPipelineInstanceIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing produced instance ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(consumedSnapshotIDsJSON), &decision.ConsumedSnapshotIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing consumed snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(producedSnapshotIDsJSON), &decision.ProducedSnapshotIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing produced snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(recoverTargetSnapshotIDsJSON), &decision.RecoverTargetSnapshotIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing recover target snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(reusableSnapshotIDsJSON), &decision.ReusableSnapshotIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing reusable snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(recoverAnchorSnapshotIDsJSON), &decision.RecoverAnchorSnapshotIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing recover anchor snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(previousAttemptSnapshotIDsJSON), &decision.PreviousAttemptSnapshotIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing previous attempt snapshot ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(failureReportBagIDsJSON), &decision.FailureReportBagIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing failure report bag ids: %w", err)
+	}
+	if err := json.Unmarshal([]byte(previousOutputBagIDsJSON), &decision.PreviousOutputBagIDs); err != nil {
+		return SnapshotProcessingDecision{}, fmt.Errorf("unmarshal snapshot processing previous output bag ids: %w", err)
+	}
+	parsedCreatedAt, err := parseTime(createdAt)
+	if err != nil {
+		return SnapshotProcessingDecision{}, err
+	}
+	parsedUpdatedAt, err := parseTime(updatedAt)
+	if err != nil {
+		return SnapshotProcessingDecision{}, err
+	}
+	decision.CreatedAt = parsedCreatedAt
+	decision.UpdatedAt = parsedUpdatedAt
+	return decision, nil
 }
 
 func marshalStringSlice(items []string) (string, error) {
@@ -1024,6 +1385,21 @@ var sqliteSchemaStatements = []string{
 		snapshot_id TEXT PRIMARY KEY,
 		run_id TEXT NOT NULL,
 		task_id TEXT NOT NULL,
+		logical_snapshot_id TEXT,
+		snapshot_version_id TEXT,
+		snapshot_version_no INTEGER NOT NULL DEFAULT 0,
+		arrival_kind TEXT,
+		branch_kind TEXT,
+		branch_from_snapshot_id TEXT,
+		recover_from_snapshot_id TEXT,
+		recover_target_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		reusable_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		recover_anchor_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		previous_attempt_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		failure_report_bag_ids_json TEXT NOT NULL DEFAULT '[]',
+		previous_output_bag_ids_json TEXT NOT NULL DEFAULT '[]',
+		repair_target_transition_id TEXT,
+		repair_target_task_id TEXT,
 		pipeline_instance_id TEXT,
 		transition_id TEXT,
 		agent_role TEXT,
@@ -1050,6 +1426,7 @@ var sqliteSchemaStatements = []string{
 		ref_name TEXT NOT NULL,
 		run_id TEXT NOT NULL,
 		frontier_snapshot_id TEXT,
+		frontier_member_snapshot_ids_json TEXT,
 		frontier_snapshot_ids_json TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
 		PRIMARY KEY (ref_name, run_id)
@@ -1065,10 +1442,40 @@ var sqliteSchemaStatements = []string{
 		details_json TEXT,
 		created_at TEXT NOT NULL
 	)`,
+	`CREATE TABLE IF NOT EXISTS snapshot_processing_decisions (
+		decision_id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL,
+		ref_name TEXT NOT NULL,
+		snapshot_id TEXT NOT NULL,
+		snapshot_version_id TEXT,
+		status TEXT NOT NULL,
+		decision_kind TEXT,
+		continuation_id TEXT,
+		reason TEXT,
+		produced_task_ids_json TEXT NOT NULL,
+		produced_pipeline_instance_ids_json TEXT NOT NULL,
+		consumed_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		produced_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		from_frontier_snapshot_id TEXT NOT NULL DEFAULT '',
+		to_frontier_snapshot_id TEXT NOT NULL DEFAULT '',
+		recover_target_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		reusable_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		recover_anchor_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		failed_snapshot_id TEXT NOT NULL DEFAULT '',
+		previous_attempt_snapshot_ids_json TEXT NOT NULL DEFAULT '[]',
+		failure_report_bag_ids_json TEXT NOT NULL DEFAULT '[]',
+		previous_output_bag_ids_json TEXT NOT NULL DEFAULT '[]',
+		repair_target_transition_id TEXT NOT NULL DEFAULT '',
+		repair_target_task_id TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		UNIQUE (run_id, ref_name, snapshot_id)
+	)`,
 	`CREATE INDEX IF NOT EXISTS idx_logical_artifacts_run ON logical_artifacts (run_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_artifact_versions_logical ON artifact_versions (logical_artifact_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_artifact_bags_run ON artifact_bags (run_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_snapshots_run_task ON task_snapshots (run_id, task_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_frontier_snapshots_run ON frontier_snapshots (run_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_ref_move_events_run_ref ON ref_move_events (run_id, ref_name, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_snapshot_processing_run_ref ON snapshot_processing_decisions (run_id, ref_name, created_at)`,
 }

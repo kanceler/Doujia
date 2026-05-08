@@ -2,13 +2,12 @@ package pipeline
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 )
 
 func TestLoadJSONRegistryLooksUpDefinitions(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := fullDeliveryRegistryPath()
 	registry, err := LoadJSONRegistry(path)
 	if err != nil {
 		t.Fatalf("LoadJSONRegistry() error = %v", err)
@@ -72,7 +71,7 @@ func TestNewLegacyRegistryFromSpecCompilesLinearTaskPipeline(t *testing.T) {
 
 func TestLegacyAdapterCompilesFullDeliveryTaskPrefix(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := fullDeliveryRegistryPath()
 	spec, err := LoadRegistrySpec(path)
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
@@ -87,12 +86,12 @@ func TestLegacyAdapterCompilesFullDeliveryTaskPrefix(t *testing.T) {
 	}
 	wantStages := []string{
 		"ceo_write_requirement",
-		"pm_write_plan",
+		"pm_write_product_plan",
 		"ceo_review_product_plan",
-		"architect_write_plan",
+		"architect_write_architecture",
 		"pm_review_architecture",
 		"architect_create_container",
-		"split_module",
+		"architect_split_modules",
 	}
 	if got, want := len(legacy.Stages), len(wantStages); got != want {
 		t.Fatalf("stage count = %d, want %d", got, want)

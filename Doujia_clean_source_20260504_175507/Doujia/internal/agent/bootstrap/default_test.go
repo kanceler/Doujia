@@ -430,7 +430,7 @@ func TestPluginManagerDispatchesRPCRoleDriver(t *testing.T) {
 func TestMutablePipelineCatalogReplaceKeepsNonLegacyDefinitionsWhileCompilingRunnableSubset(t *testing.T) {
 	t.Parallel()
 
-	spec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	spec, err := pipeline.LoadRegistrySpec(fullDeliveryRegistryPathForTest())
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -698,4 +698,8 @@ func hasProducedBagMember(items []appcore.ProducedBagMember, logicalKey string, 
 		return true
 	}
 	return false
+}
+
+func fullDeliveryRegistryPathForTest() string {
+	return filepath.Join("..", "..", "orchestrator", "testdata", "full_delivery", "pipeline_full_delivery.spec.json")
 }

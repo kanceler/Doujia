@@ -1,0 +1,173 @@
+{
+  "schema_version": "devflow.pipeline.registry/v0.4",
+  "registry_id": "scheduling_recover_repair_registry",
+  "entry_pipeline_id": "parent_recover_repair",
+  "pipeline_defs": [
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "owner_repairable_code",
+      "kind": "subpipeline",
+      "name": "Owner Repairable Code",
+      "namespace": {
+        "agents": [{"name": "coder", "role": "coder", "default_agent_id": "coder01"}],
+        "bags": [{"name": "module_input"}, {"name": "code_bag"}, {"name": "failure_report"}]
+      },
+      "signature": {
+        "input_bags": [{"name": "module_input"}],
+        "output_bags": [{"name": "code_bag"}],
+        "exported_handlers": [{
+          "name": "debug_code",
+          "handler": "debug_code",
+          "handles": ["kbug"],
+          "replaces": [{"name": "code_bag"}]
+        }]
+      },
+      "handlers": [{
+        "name": "debug_code",
+        "handles": ["kbug"],
+        "transition": "debug_code",
+        "input_bags": [
+          {"name": "failure_report", "source": "exception"},
+          {"name": "module_input", "source": "owner_input"},
+          {"name": "code_bag", "source": "owner_output"}
+        ],
+        "replace_bags": [{"name": "code_bag", "from_transition": "debug_code"}],
+        "resume": {"type": "retry_failed_transition"}
+      }],
+      "start_state": "start",
+      "delivery_state": "done",
+      "states": [
+        {
+          "id": "start",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "next": {"type": "all", "transitions": ["debug_code"]}
+        },
+        {
+          "id": "done",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "debug_code"},
+          "exposes": {"bags": [{"name": "code_bag"}]}
+        }
+      ],
+      "transitions": [{
+        "id": "debug_code",
+        "kind": "task",
+        "from_state": "start",
+        "to_state": "done",
+        "agent": {"role": "coder", "alias": "coder"},
+        "op": "debug_write_code",
+        "input_bags": [{"name": "module_input"}, {"name": "code_bag"}, {"name": "failure_report"}],
+        "output_bags": [{"name": "code_bag"}],
+        "limits": {"max_attempts": 3}
+      }]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "checker_throws_bug",
+      "kind": "subpipeline",
+      "name": "Checker Throws Bug",
+      "namespace": {
+        "agents": [{"name": "tester", "role": "tester", "default_agent_id": "tester01"}],
+        "bags": [{"name": "code_bag"}, {"name": "failure_report"}]
+      },
+      "signature": {
+        "input_bags": [{"name": "code_bag"}],
+        "throws": [{"result": "kbug", "bags": [{"name": "failure_report"}]}]
+      },
+      "start_state": "start",
+      "delivery_state": "done",
+      "states": [
+        {
+          "id": "start",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "next": {"type": "all", "transitions": ["test_code"]}
+        },
+        {
+          "id": "done",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "test_code"}
+        }
+      ],
+      "transitions": [{
+        "id": "test_code",
+        "kind": "task",
+        "from_state": "start",
+        "to_state": "done",
+        "agent": {"role": "tester", "alias": "tester"},
+        "op": "test_code",
+        "input_bags": [{"name": "code_bag"}],
+        "output_bags_by_result": {
+          "kbug": [{"name": "failure_report"}]
+        }
+      }]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "parent_recover_repair",
+      "kind": "entry",
+      "name": "Parent Recover Repair",
+      "namespace": {
+        "agents": [{"name": "coder", "role": "coder", "default_agent_id": "coder01"}],
+        "bags": [{"name": "module_input"}, {"name": "code_bag"}, {"name": "failure_report"}]
+      },
+      "handlers": [{
+        "name": "debug_code",
+        "handles": ["kbug"],
+        "transition": "debug_code",
+        "input_bags": [{"name": "failure_report", "source": "exception"}],
+        "replace_bags": [{"name": "code_bag"}],
+        "resume": {"type": "retry_failed_transition"}
+      }],
+      "exception_handlers": {
+        "kbug": {
+          "select": "nearest_matching",
+          "join": "all_success",
+          "on_unhandled": "fail_run",
+          "resume": {"type": "retry_failed_transition"}
+        }
+      },
+      "start_state": "start",
+      "delivery_state": "done",
+      "states": [
+        {"id": "start", "kind": "start", "proof": {"type": "external"}, "next": {"type": "all", "transitions": ["call_owner", "call_checker"]}},
+        {"id": "done", "kind": "delivery", "proof": {"type": "external"}}
+      ],
+      "transitions": [
+        {
+          "id": "call_owner",
+          "kind": "call",
+          "pipeline_id": "owner_repairable_code",
+          "from_state": "start",
+          "to_state": "done",
+          "mode": "single",
+          "bindings": {
+            "input_bags": {"module_input": {"name": "module_input"}}
+          },
+          "output_bags": [{"name": "code_bag"}],
+          "output_handlers": [{"name": "debug_code", "from_handler": "debug_code"}]
+        },
+        {
+          "id": "call_checker",
+          "kind": "call",
+          "pipeline_id": "checker_throws_bug",
+          "from_state": "start",
+          "to_state": "done",
+          "mode": "single",
+          "bindings": {"input_bags": {"code_bag": {"name": "code_bag"}}}
+        },
+        {
+          "id": "debug_code",
+          "kind": "task",
+          "from_state": "start",
+          "to_state": "done",
+          "agent": {"role": "coder", "alias": "coder"},
+          "op": "debug_write_code",
+          "limits": {"max_attempts": 3},
+          "output_bags": [{"name": "code_bag"}]
+        }
+      ]
+    }
+  ]
+}

@@ -22,6 +22,14 @@ const (
 	RefMoveModeRecover  = "recover"
 	RefMoveModeFailRun  = "fail_run"
 	RefMoveModeCheckout = "checkout"
+
+	DecisionKindFanout     = "fanout"
+	DecisionKindMerge      = "merge"
+	DecisionKindCallReturn = "call_return"
+	DecisionKindRepair     = "repair"
+
+	SnapshotProcessingStatusAdvanced = "advanced"
+	SnapshotProcessingStatusTerminal = "terminal"
 )
 
 var ErrRefCASConflict = errors.New("ref compare-and-swap conflict")
@@ -56,20 +64,35 @@ type ArtifactBag struct {
 }
 
 type TaskSnapshot struct {
-	SnapshotID         string                  `json:"snapshot_id"`
-	RunID              core.RunID              `json:"run_id"`
-	TaskID             core.TaskID             `json:"task_id"`
-	PipelineInstanceID core.PipelineInstanceID `json:"pipeline_instance_id,omitempty"`
-	TransitionID       core.StageID            `json:"transition_id,omitempty"`
-	AgentRole          core.AgentRole          `json:"agent_role,omitempty"`
-	AgentID            core.AgentID            `json:"agent_id,omitempty"`
-	Op                 string                  `json:"op,omitempty"`
-	Result             core.TaskResultCode     `json:"result"`
-	InputBagIDs        []string                `json:"input_bag_ids"`
-	OutputBagIDs       []string                `json:"output_bag_ids"`
-	DiagnosticsJSON    string                  `json:"diagnostics_json,omitempty"`
-	RuntimeContextJSON string                  `json:"runtime_context_json,omitempty"`
-	CreatedAt          time.Time               `json:"created_at"`
+	SnapshotID                 string                  `json:"snapshot_id"`
+	RunID                      core.RunID              `json:"run_id"`
+	TaskID                     core.TaskID             `json:"task_id"`
+	LogicalSnapshotID          string                  `json:"logical_snapshot_id,omitempty"`
+	SnapshotVersionID          string                  `json:"snapshot_version_id,omitempty"`
+	SnapshotVersionNo          int                     `json:"snapshot_version_no,omitempty"`
+	ArrivalKind                string                  `json:"arrival_kind,omitempty"`
+	BranchKind                 string                  `json:"branch_kind,omitempty"`
+	BranchFromSnapshotID       string                  `json:"branch_from_snapshot_id,omitempty"`
+	RecoverFromSnapshotID      string                  `json:"recover_from_snapshot_id,omitempty"`
+	RecoverTargetSnapshotIDs   []string                `json:"recover_target_snapshot_ids,omitempty"`
+	ReusableSnapshotIDs        []string                `json:"reusable_snapshot_ids,omitempty"`
+	RecoverAnchorSnapshotIDs   []string                `json:"recover_anchor_snapshot_ids,omitempty"`
+	PreviousAttemptSnapshotIDs []string                `json:"previous_attempt_snapshot_ids,omitempty"`
+	FailureReportBagIDs        []string                `json:"failure_report_bag_ids,omitempty"`
+	PreviousOutputBagIDs       []string                `json:"previous_output_bag_ids,omitempty"`
+	RepairTargetTransitionID   string                  `json:"repair_target_transition_id,omitempty"`
+	RepairTargetTaskID         string                  `json:"repair_target_task_id,omitempty"`
+	PipelineInstanceID         core.PipelineInstanceID `json:"pipeline_instance_id,omitempty"`
+	TransitionID               core.StageID            `json:"transition_id,omitempty"`
+	AgentRole                  core.AgentRole          `json:"agent_role,omitempty"`
+	AgentID                    core.AgentID            `json:"agent_id,omitempty"`
+	Op                         string                  `json:"op,omitempty"`
+	Result                     core.TaskResultCode     `json:"result"`
+	InputBagIDs                []string                `json:"input_bag_ids"`
+	OutputBagIDs               []string                `json:"output_bag_ids"`
+	DiagnosticsJSON            string                  `json:"diagnostics_json,omitempty"`
+	RuntimeContextJSON         string                  `json:"runtime_context_json,omitempty"`
+	CreatedAt                  time.Time               `json:"created_at"`
 }
 
 type FrontierSnapshot struct {
@@ -84,11 +107,12 @@ type FrontierSnapshot struct {
 }
 
 type Ref struct {
-	RefName             string     `json:"ref_name"`
-	RunID               core.RunID `json:"run_id"`
-	FrontierSnapshotID  string     `json:"frontier_snapshot_id,omitempty"`
-	FrontierSnapshotIDs []string   `json:"frontier_snapshot_ids"`
-	UpdatedAt           time.Time  `json:"updated_at"`
+	RefName                   string     `json:"ref_name"`
+	RunID                     core.RunID `json:"run_id"`
+	FrontierSnapshotID        string     `json:"frontier_snapshot_id,omitempty"`
+	FrontierMemberSnapshotIDs []string   `json:"frontier_member_snapshot_ids,omitempty"`
+	FrontierSnapshotIDs       []string   `json:"frontier_snapshot_ids"`
+	UpdatedAt                 time.Time  `json:"updated_at"`
 }
 
 type RefMoveEvent struct {
@@ -101,6 +125,35 @@ type RefMoveEvent struct {
 	Reason                  string     `json:"reason,omitempty"`
 	DetailsJSON             string     `json:"details_json,omitempty"`
 	CreatedAt               time.Time  `json:"created_at"`
+}
+
+type SnapshotProcessingDecision struct {
+	DecisionID                  string     `json:"decision_id"`
+	RunID                       core.RunID `json:"run_id"`
+	RefName                     string     `json:"ref_name"`
+	SnapshotID                  string     `json:"snapshot_id"`
+	SnapshotVersionID           string     `json:"snapshot_version_id,omitempty"`
+	Status                      string     `json:"status"`
+	DecisionKind                string     `json:"decision_kind,omitempty"`
+	ContinuationID              string     `json:"continuation_id,omitempty"`
+	Reason                      string     `json:"reason,omitempty"`
+	ProducedTaskIDs             []string   `json:"produced_task_ids,omitempty"`
+	ProducedPipelineInstanceIDs []string   `json:"produced_pipeline_instance_ids,omitempty"`
+	ConsumedSnapshotIDs         []string   `json:"consumed_snapshot_ids,omitempty"`
+	ProducedSnapshotIDs         []string   `json:"produced_snapshot_ids,omitempty"`
+	FromFrontierSnapshotID      string     `json:"from_frontier_snapshot_id,omitempty"`
+	ToFrontierSnapshotID        string     `json:"to_frontier_snapshot_id,omitempty"`
+	RecoverTargetSnapshotIDs    []string   `json:"recover_target_snapshot_ids,omitempty"`
+	ReusableSnapshotIDs         []string   `json:"reusable_snapshot_ids,omitempty"`
+	RecoverAnchorSnapshotIDs    []string   `json:"recover_anchor_snapshot_ids,omitempty"`
+	FailedSnapshotID            string     `json:"failed_snapshot_id,omitempty"`
+	PreviousAttemptSnapshotIDs  []string   `json:"previous_attempt_snapshot_ids,omitempty"`
+	FailureReportBagIDs         []string   `json:"failure_report_bag_ids,omitempty"`
+	PreviousOutputBagIDs        []string   `json:"previous_output_bag_ids,omitempty"`
+	RepairTargetTransitionID    string     `json:"repair_target_transition_id,omitempty"`
+	RepairTargetTaskID          string     `json:"repair_target_task_id,omitempty"`
+	CreatedAt                   time.Time  `json:"created_at"`
+	UpdatedAt                   time.Time  `json:"updated_at"`
 }
 
 type MoveRefRequest struct {
@@ -169,6 +222,20 @@ func StableRefMoveEventID(runID core.RunID, refName string, fromFrontierSnapshot
 		createdAt.UTC().Format(time.RFC3339Nano),
 	}, "\x00")
 	return "refmove:" + shortHash(raw)
+}
+
+func StableSnapshotProcessingDecisionID(runID core.RunID, refName string, snapshotID string, status string) string {
+	refName = strings.TrimSpace(refName)
+	if refName == "" {
+		refName = DefaultRefName
+	}
+	raw := strings.Join([]string{
+		string(runID),
+		refName,
+		strings.TrimSpace(snapshotID),
+		strings.TrimSpace(status),
+	}, "\x00")
+	return "snapdecision:" + shortHash(raw)
 }
 
 func NormalizeIDs(items []string) []string {

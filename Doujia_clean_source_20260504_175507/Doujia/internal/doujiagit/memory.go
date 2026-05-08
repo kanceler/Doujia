@@ -30,6 +30,7 @@ type MemoryRepository struct {
 	frontiers map[string]FrontierSnapshot
 	refs      map[refKey]Ref
 	refMoves  map[string]RefMoveEvent
+	decisions map[processingDecisionKey]SnapshotProcessingDecision
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -45,6 +46,7 @@ func NewMemoryRepository() *MemoryRepository {
 		frontiers:           make(map[string]FrontierSnapshot),
 		refs:                make(map[refKey]Ref),
 		refMoves:            make(map[string]RefMoveEvent),
+		decisions:           make(map[processingDecisionKey]SnapshotProcessingDecision),
 	}
 }
 
@@ -480,6 +482,57 @@ func (r *MemoryRepository) ListRefMoveEvents(_ context.Context, runID core.RunID
 	return items, nil
 }
 
+func (r *MemoryRepository) CreateSnapshotProcessingDecision(_ context.Context, decision SnapshotProcessingDecision) error {
+	decision, err := normalizeSnapshotProcessingDecision(decision)
+	if err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.snapshots[decision.SnapshotID]; !ok {
+		return fmt.Errorf("task snapshot %q not found", decision.SnapshotID)
+	}
+	key := newProcessingDecisionKey(decision.RunID, decision.RefName, decision.SnapshotID)
+	if _, ok := r.decisions[key]; ok {
+		return fmt.Errorf("snapshot processing decision for run %q ref %q snapshot %q already exists", decision.RunID, decision.RefName, decision.SnapshotID)
+	}
+	r.decisions[key] = decision
+	return nil
+}
+
+func (r *MemoryRepository) GetSnapshotProcessingDecision(_ context.Context, runID core.RunID, refName string, snapshotID string) (SnapshotProcessingDecision, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	decision, ok := r.decisions[newProcessingDecisionKey(runID, refName, snapshotID)]
+	if !ok {
+		return SnapshotProcessingDecision{}, fmt.Errorf("snapshot processing decision for run %q ref %q snapshot %q not found", runID, refName, snapshotID)
+	}
+	return cloneSnapshotProcessingDecision(decision), nil
+}
+
+func (r *MemoryRepository) ListSnapshotProcessingDecisions(_ context.Context, runID core.RunID, refName string) ([]SnapshotProcessingDecision, error) {
+	if strings.TrimSpace(refName) == "" {
+		refName = DefaultRefName
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	items := make([]SnapshotProcessingDecision, 0)
+	for _, decision := range r.decisions {
+		if decision.RunID != runID || decision.RefName != strings.TrimSpace(refName) {
+			continue
+		}
+		items = append(items, cloneSnapshotProcessingDecision(decision))
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.Before(items[j].CreatedAt)
+		}
+		return items[i].DecisionID < items[j].DecisionID
+	})
+	return items, nil
+}
+
 func normalizeObject(obj ArtifactObject) (ArtifactObject, error) {
 	obj.ObjectID = strings.TrimSpace(obj.ObjectID)
 	obj.ObjectType = strings.TrimSpace(obj.ObjectType)
@@ -557,6 +610,14 @@ func normalizeBag(bag ArtifactBag) (ArtifactBag, error) {
 
 func normalizeSnapshot(snapshot TaskSnapshot) (TaskSnapshot, error) {
 	snapshot.SnapshotID = strings.TrimSpace(snapshot.SnapshotID)
+	snapshot.LogicalSnapshotID = strings.TrimSpace(snapshot.LogicalSnapshotID)
+	snapshot.SnapshotVersionID = strings.TrimSpace(snapshot.SnapshotVersionID)
+	snapshot.ArrivalKind = strings.TrimSpace(snapshot.ArrivalKind)
+	snapshot.BranchKind = strings.TrimSpace(snapshot.BranchKind)
+	snapshot.BranchFromSnapshotID = strings.TrimSpace(snapshot.BranchFromSnapshotID)
+	snapshot.RecoverFromSnapshotID = strings.TrimSpace(snapshot.RecoverFromSnapshotID)
+	snapshot.RepairTargetTransitionID = strings.TrimSpace(snapshot.RepairTargetTransitionID)
+	snapshot.RepairTargetTaskID = strings.TrimSpace(snapshot.RepairTargetTaskID)
 	snapshot.PipelineInstanceID = core.PipelineInstanceID(strings.TrimSpace(string(snapshot.PipelineInstanceID)))
 	snapshot.TransitionID = core.StageID(strings.TrimSpace(string(snapshot.TransitionID)))
 	snapshot.AgentRole = core.AgentRole(strings.TrimSpace(string(snapshot.AgentRole)))
@@ -566,6 +627,12 @@ func normalizeSnapshot(snapshot TaskSnapshot) (TaskSnapshot, error) {
 	snapshot.RuntimeContextJSON = strings.TrimSpace(snapshot.RuntimeContextJSON)
 	snapshot.InputBagIDs = NormalizeIDs(snapshot.InputBagIDs)
 	snapshot.OutputBagIDs = NormalizeIDs(snapshot.OutputBagIDs)
+	snapshot.RecoverTargetSnapshotIDs = NormalizeIDs(snapshot.RecoverTargetSnapshotIDs)
+	snapshot.ReusableSnapshotIDs = NormalizeIDs(snapshot.ReusableSnapshotIDs)
+	snapshot.RecoverAnchorSnapshotIDs = NormalizeIDs(snapshot.RecoverAnchorSnapshotIDs)
+	snapshot.PreviousAttemptSnapshotIDs = NormalizeIDs(snapshot.PreviousAttemptSnapshotIDs)
+	snapshot.FailureReportBagIDs = NormalizeIDs(snapshot.FailureReportBagIDs)
+	snapshot.PreviousOutputBagIDs = NormalizeIDs(snapshot.PreviousOutputBagIDs)
 	if snapshot.SnapshotID == "" {
 		if snapshot.RunID == "" || snapshot.TaskID == "" {
 			return TaskSnapshot{}, fmt.Errorf("task snapshot id is required")
@@ -615,7 +682,14 @@ func normalizeFrontierSnapshot(snapshot FrontierSnapshot) (FrontierSnapshot, err
 func normalizeRef(ref Ref) (Ref, error) {
 	ref.RefName = strings.TrimSpace(ref.RefName)
 	ref.FrontierSnapshotID = strings.TrimSpace(ref.FrontierSnapshotID)
+	ref.FrontierMemberSnapshotIDs = NormalizeIDs(ref.FrontierMemberSnapshotIDs)
 	ref.FrontierSnapshotIDs = NormalizeIDs(ref.FrontierSnapshotIDs)
+	if len(ref.FrontierMemberSnapshotIDs) == 0 && len(ref.FrontierSnapshotIDs) > 0 {
+		ref.FrontierMemberSnapshotIDs = append([]string(nil), ref.FrontierSnapshotIDs...)
+	}
+	if len(ref.FrontierSnapshotIDs) == 0 && len(ref.FrontierMemberSnapshotIDs) > 0 {
+		ref.FrontierSnapshotIDs = append([]string(nil), ref.FrontierMemberSnapshotIDs...)
+	}
 	if ref.RefName == "" {
 		ref.RefName = DefaultRefName
 	}
@@ -660,6 +734,56 @@ func normalizeRefMoveEvent(event RefMoveEvent) (RefMoveEvent, error) {
 	return event, nil
 }
 
+func normalizeSnapshotProcessingDecision(decision SnapshotProcessingDecision) (SnapshotProcessingDecision, error) {
+	decision.DecisionID = strings.TrimSpace(decision.DecisionID)
+	decision.RefName = strings.TrimSpace(decision.RefName)
+	decision.SnapshotID = strings.TrimSpace(decision.SnapshotID)
+	decision.SnapshotVersionID = strings.TrimSpace(decision.SnapshotVersionID)
+	decision.Status = strings.TrimSpace(decision.Status)
+	decision.DecisionKind = strings.TrimSpace(decision.DecisionKind)
+	decision.ContinuationID = strings.TrimSpace(decision.ContinuationID)
+	decision.Reason = strings.TrimSpace(decision.Reason)
+	decision.FromFrontierSnapshotID = strings.TrimSpace(decision.FromFrontierSnapshotID)
+	decision.ToFrontierSnapshotID = strings.TrimSpace(decision.ToFrontierSnapshotID)
+	decision.FailedSnapshotID = strings.TrimSpace(decision.FailedSnapshotID)
+	decision.RepairTargetTransitionID = strings.TrimSpace(decision.RepairTargetTransitionID)
+	decision.RepairTargetTaskID = strings.TrimSpace(decision.RepairTargetTaskID)
+	decision.ProducedTaskIDs = NormalizeIDs(decision.ProducedTaskIDs)
+	decision.ProducedPipelineInstanceIDs = NormalizeIDs(decision.ProducedPipelineInstanceIDs)
+	decision.ConsumedSnapshotIDs = NormalizeIDs(decision.ConsumedSnapshotIDs)
+	decision.ProducedSnapshotIDs = NormalizeIDs(decision.ProducedSnapshotIDs)
+	decision.RecoverTargetSnapshotIDs = NormalizeIDs(decision.RecoverTargetSnapshotIDs)
+	decision.ReusableSnapshotIDs = NormalizeIDs(decision.ReusableSnapshotIDs)
+	decision.RecoverAnchorSnapshotIDs = NormalizeIDs(decision.RecoverAnchorSnapshotIDs)
+	decision.PreviousAttemptSnapshotIDs = NormalizeIDs(decision.PreviousAttemptSnapshotIDs)
+	decision.FailureReportBagIDs = NormalizeIDs(decision.FailureReportBagIDs)
+	decision.PreviousOutputBagIDs = NormalizeIDs(decision.PreviousOutputBagIDs)
+	if decision.RunID == "" {
+		return SnapshotProcessingDecision{}, fmt.Errorf("snapshot processing decision run_id is required")
+	}
+	if decision.RefName == "" {
+		decision.RefName = DefaultRefName
+	}
+	if decision.SnapshotID == "" {
+		return SnapshotProcessingDecision{}, fmt.Errorf("snapshot processing decision snapshot_id is required")
+	}
+	switch decision.Status {
+	case SnapshotProcessingStatusAdvanced, SnapshotProcessingStatusTerminal:
+	default:
+		return SnapshotProcessingDecision{}, fmt.Errorf("snapshot processing decision status %q is invalid", decision.Status)
+	}
+	if decision.CreatedAt.IsZero() {
+		decision.CreatedAt = time.Now().UTC()
+	}
+	if decision.UpdatedAt.IsZero() {
+		decision.UpdatedAt = decision.CreatedAt
+	}
+	if decision.DecisionID == "" {
+		decision.DecisionID = StableSnapshotProcessingDecisionID(decision.RunID, decision.RefName, decision.SnapshotID, decision.Status)
+	}
+	return decision, nil
+}
+
 func cloneBag(bag ArtifactBag) ArtifactBag {
 	bag.ArtifactVersionIDs = append([]string(nil), bag.ArtifactVersionIDs...)
 	return bag
@@ -668,6 +792,12 @@ func cloneBag(bag ArtifactBag) ArtifactBag {
 func cloneSnapshot(snapshot TaskSnapshot) TaskSnapshot {
 	snapshot.InputBagIDs = append([]string(nil), snapshot.InputBagIDs...)
 	snapshot.OutputBagIDs = append([]string(nil), snapshot.OutputBagIDs...)
+	snapshot.RecoverTargetSnapshotIDs = append([]string(nil), snapshot.RecoverTargetSnapshotIDs...)
+	snapshot.ReusableSnapshotIDs = append([]string(nil), snapshot.ReusableSnapshotIDs...)
+	snapshot.RecoverAnchorSnapshotIDs = append([]string(nil), snapshot.RecoverAnchorSnapshotIDs...)
+	snapshot.PreviousAttemptSnapshotIDs = append([]string(nil), snapshot.PreviousAttemptSnapshotIDs...)
+	snapshot.FailureReportBagIDs = append([]string(nil), snapshot.FailureReportBagIDs...)
+	snapshot.PreviousOutputBagIDs = append([]string(nil), snapshot.PreviousOutputBagIDs...)
 	return snapshot
 }
 
@@ -678,6 +808,7 @@ func cloneFrontierSnapshot(snapshot FrontierSnapshot) FrontierSnapshot {
 }
 
 func cloneRef(ref Ref) Ref {
+	ref.FrontierMemberSnapshotIDs = append([]string(nil), ref.FrontierMemberSnapshotIDs...)
 	ref.FrontierSnapshotIDs = append([]string(nil), ref.FrontierSnapshotIDs...)
 	return ref
 }
@@ -686,6 +817,20 @@ func cloneRefMoveEvent(event RefMoveEvent) RefMoveEvent {
 	event.FromFrontierSnapshotIDs = append([]string(nil), event.FromFrontierSnapshotIDs...)
 	event.ToFrontierSnapshotIDs = append([]string(nil), event.ToFrontierSnapshotIDs...)
 	return event
+}
+
+func cloneSnapshotProcessingDecision(decision SnapshotProcessingDecision) SnapshotProcessingDecision {
+	decision.ProducedTaskIDs = append([]string(nil), decision.ProducedTaskIDs...)
+	decision.ProducedPipelineInstanceIDs = append([]string(nil), decision.ProducedPipelineInstanceIDs...)
+	decision.ConsumedSnapshotIDs = append([]string(nil), decision.ConsumedSnapshotIDs...)
+	decision.ProducedSnapshotIDs = append([]string(nil), decision.ProducedSnapshotIDs...)
+	decision.RecoverTargetSnapshotIDs = append([]string(nil), decision.RecoverTargetSnapshotIDs...)
+	decision.ReusableSnapshotIDs = append([]string(nil), decision.ReusableSnapshotIDs...)
+	decision.RecoverAnchorSnapshotIDs = append([]string(nil), decision.RecoverAnchorSnapshotIDs...)
+	decision.PreviousAttemptSnapshotIDs = append([]string(nil), decision.PreviousAttemptSnapshotIDs...)
+	decision.FailureReportBagIDs = append([]string(nil), decision.FailureReportBagIDs...)
+	decision.PreviousOutputBagIDs = append([]string(nil), decision.PreviousOutputBagIDs...)
+	return decision
 }
 
 type logicalKey struct {
@@ -717,6 +862,24 @@ func newVersionKey(logicalArtifactID string, objectIDs []string) versionKey {
 type refKey struct {
 	runID   core.RunID
 	refName string
+}
+
+type processingDecisionKey struct {
+	runID      core.RunID
+	refName    string
+	snapshotID string
+}
+
+func newProcessingDecisionKey(runID core.RunID, refName string, snapshotID string) processingDecisionKey {
+	refName = strings.TrimSpace(refName)
+	if refName == "" {
+		refName = DefaultRefName
+	}
+	return processingDecisionKey{
+		runID:      runID,
+		refName:    refName,
+		snapshotID: strings.TrimSpace(snapshotID),
+	}
 }
 
 func newRefKey(runID core.RunID, refName string) refKey {

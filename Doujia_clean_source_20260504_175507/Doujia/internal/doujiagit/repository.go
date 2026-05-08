@@ -34,4 +34,8 @@ type Repository interface {
 	ListRefsByRun(ctx context.Context, runID core.RunID) ([]Ref, error)
 	CreateRefMoveEvent(ctx context.Context, event RefMoveEvent) error
 	ListRefMoveEvents(ctx context.Context, runID core.RunID, refName string) ([]RefMoveEvent, error)
+
+	CreateSnapshotProcessingDecision(ctx context.Context, decision SnapshotProcessingDecision) error
+	GetSnapshotProcessingDecision(ctx context.Context, runID core.RunID, refName string, snapshotID string) (SnapshotProcessingDecision, error)
+	ListSnapshotProcessingDecisions(ctx context.Context, runID core.RunID, refName string) ([]SnapshotProcessingDecision, error)
 }

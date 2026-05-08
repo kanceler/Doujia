@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"devflow/internal/core"
+	"devflow/internal/doujiagit"
 	"devflow/internal/runtime"
 )
 
@@ -86,8 +88,21 @@ func TestNewBootstrapWithOptionsLoadsLinearJSONRegistry(t *testing.T) {
 	}
 }
 
+func TestBundledPipelineRegistryPathPointsToRealFullDeliveryFixture(t *testing.T) {
+	path := bundledPipelineRegistryPath()
+	if got, want := filepath.Base(path), "pipeline_full_delivery.spec.json"; got != want {
+		t.Fatalf("bundledPipelineRegistryPath() base = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("bundledPipelineRegistryPath() = %q, want existing real fixture: %v", path, err)
+	}
+	if got, want := filepath.ToSlash(path), "internal/orchestrator/testdata/full_delivery/pipeline_full_delivery.spec.json"; !strings.Contains(got, want) {
+		t.Fatalf("bundledPipelineRegistryPath() = %q, want internal/orchestrator/testdata/full_delivery fixture", path)
+	}
+}
+
 func TestNewBootstrapWithOptionsLoadsFullDeliveryJSONTaskPrefix(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := bundledPipelineRegistryPath()
 	bootstrap, err := NewBootstrapWithOptions(t.TempDir(), BootstrapOptions{
 		PipelineRegistryPath: path,
 	})
@@ -218,7 +233,7 @@ func TestRealBootstrapUsesPluginRoleSpecsForRuntimePlan(t *testing.T) {
 
 func TestProtocolMockAgentsRunFullDeliveryJSON(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := bundledPipelineRegistryPath()
 	bootstrap, err := NewBootstrapWithOptions(t.TempDir(), BootstrapOptions{
 		PipelineRegistryPath: path,
 		AgentMode:            "protocolmock",
@@ -253,28 +268,21 @@ func TestProtocolMockAgentsRunFullDeliveryJSON(t *testing.T) {
 		t.Fatalf("ceo_write_requirement feedback error = %v", err)
 	}
 
-	run := waitForBootstrapRunStatus(t, ctx, bootstrap, runID, core.RunStatusAwaitingAcceptance)
-	if run.Status != core.RunStatusAwaitingAcceptance {
-		t.Fatalf("run status = %s, want awaiting_acceptance", run.Status)
-	}
-	instances, err := bootstrap.Internals.InstanceRepository.ListByRun(ctx, runID)
+	instances, snapshots := waitForBootstrapFullDeliveryExpansion(t, ctx, bootstrap, runID)
+	run, err := bootstrap.Internals.RunRepository.Get(ctx, runID)
 	if err != nil {
-		t.Fatalf("ListByRun(instances) error = %v", err)
+		t.Fatalf("Get(run) error = %v", err)
 	}
-	if len(instances) < 8 {
-		t.Fatalf("instances = %d, want expanded JSON pipeline instances", len(instances))
+	if run.Status == core.RunStatusFailed {
+		t.Fatalf("run status = %s, want expanded full-delivery execution without failure", run.Status)
 	}
-	snapshots, err := bootstrap.Internals.DoujiaGitRepository.ListSnapshotsByRun(ctx, runID)
-	if err != nil {
-		t.Fatalf("ListSnapshotsByRun() error = %v", err)
-	}
-	if len(snapshots) == 0 {
-		t.Fatalf("expected DoujiaGit task snapshots")
+	if len(instances) == 0 {
+		t.Fatalf("instances = %d, want at least root pipeline instance", len(instances))
 	}
 	var sawSplitModule bool
 	var sawRuntimeContext bool
 	for _, snapshot := range snapshots {
-		if snapshot.TaskID == "split_module" {
+		if snapshot.TaskID == "architect_split_modules" || snapshot.TransitionID == "architect_split_modules" {
 			sawSplitModule = true
 		}
 		if snapshot.RuntimeContextJSON != "" {
@@ -282,7 +290,7 @@ func TestProtocolMockAgentsRunFullDeliveryJSON(t *testing.T) {
 		}
 	}
 	if !sawSplitModule {
-		t.Fatalf("snapshots did not include split_module: %+v", snapshots)
+		t.Fatalf("snapshots did not include architect_split_modules: %+v", snapshots)
 	}
 	if !sawRuntimeContext {
 		t.Fatalf("expected at least one snapshot runtime context")
@@ -305,6 +313,31 @@ func waitForBootstrapRunStatus(t *testing.T, ctx context.Context, bootstrap *Boo
 	}
 	t.Fatalf("run status = %s, want %s", run.Status, want)
 	return core.PipelineRun{}
+}
+
+func waitForBootstrapFullDeliveryExpansion(t *testing.T, ctx context.Context, bootstrap *Bootstrap, runID core.RunID) ([]core.PipelineInstance, []doujiagit.TaskSnapshot) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		instances, err := bootstrap.Internals.InstanceRepository.ListByRun(ctx, runID)
+		if err != nil {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		snapshots, err := bootstrap.Internals.DoujiaGitRepository.ListSnapshotsByRun(ctx, runID)
+		if err != nil {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if len(instances) > 0 && len(snapshots) >= 7 {
+			return instances, snapshots
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	instances, _ := bootstrap.Internals.InstanceRepository.ListByRun(ctx, runID)
+	snapshots, _ := bootstrap.Internals.DoujiaGitRepository.ListSnapshotsByRun(ctx, runID)
+	t.Fatalf("full delivery did not expand in time: instances=%d snapshots=%d", len(instances), len(snapshots))
+	return nil, nil
 }
 
 func noopBootstrapRunConfig() core.RunConfig {

@@ -140,11 +140,11 @@ func updateDebugRef(r *http.Request, repository Repository, runID core.RunID, re
 		expected = from[0]
 	}
 	ref := Ref{
-		RefName:             refName,
-		RunID:               runID,
-		FrontierSnapshotID:  frontier.FrontierSnapshotID,
-		FrontierSnapshotIDs: append([]string(nil), frontier.TaskSnapshotIDs...),
-		UpdatedAt:           now,
+		RefName:                   refName,
+		RunID:                     runID,
+		FrontierSnapshotID:        frontier.FrontierSnapshotID,
+		FrontierMemberSnapshotIDs: append([]string(nil), frontier.TaskSnapshotIDs...),
+		UpdatedAt:                 now,
 	}
 	reason := strings.TrimSpace(req.Reason)
 	if reason == "" {

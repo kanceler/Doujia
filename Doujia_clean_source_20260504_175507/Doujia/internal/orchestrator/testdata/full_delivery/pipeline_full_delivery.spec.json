@@ -1,0 +1,1773 @@
+{
+  "schema_version": "devflow.pipeline.registry/v0.4",
+  "registry_id": "doujia_full_delivery_new",
+  "entry_pipeline_id": "pipeline_full_delivery",
+  "pipeline_defs": [
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_write_code",
+      "kind": "subpipeline",
+      "name": "write module code",
+      "namespace": {
+        "agents": [
+          {"name": "coder", "role": "coder"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "coder", "role": "coder"}
+        ],
+        "input_bags": [
+          {"name": "module_input"}
+        ],
+        "output_bags": [
+          {"name": "code_bag", "indexed_by": ["module_key", "coder_alias"]}
+        ]
+      },
+      "start_state": "module_input_ready",
+      "delivery_state": "code_written",
+      "states": [
+        {
+          "id": "module_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["write_code"]}
+        },
+        {
+          "id": "code_written",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "write_code"},
+          "exposes": {
+            "bags": [
+              {"name": "code_bag", "from_transition": "write_code", "indexed_by": ["module_key", "coder_alias"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_code",
+          "kind": "task",
+          "from_state": "module_input_ready",
+          "to_state": "code_written",
+          "agent": {"role": "coder", "alias": "coder"},
+          "op": "write_code",
+          "input_bags": [
+            {"name": "module_input"}
+          ],
+          "output_bags": [
+            {
+              "name": "code_bag",
+              "required": true,
+              "tags": {
+                "module_key": "${params.module_key}",
+                "coder_alias": "${agents.coder}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_write_test_data",
+      "kind": "subpipeline",
+      "name": "write module test data",
+      "namespace": {
+        "agents": [
+          {"name": "tester", "role": "tester"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "tester", "role": "tester"}
+        ],
+        "input_bags": [
+          {"name": "module_input"}
+        ],
+        "output_bags": [
+          {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+        ]
+      },
+      "start_state": "module_input_ready",
+      "delivery_state": "test_data_written",
+      "states": [
+        {
+          "id": "module_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["write_test_data"]}
+        },
+        {
+          "id": "test_data_written",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "write_test_data"},
+          "exposes": {
+            "bags": [
+              {"name": "test_data_bag", "from_transition": "write_test_data", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_test_data",
+          "kind": "task",
+          "from_state": "module_input_ready",
+          "to_state": "test_data_written",
+          "agent": {"role": "tester", "alias": "tester"},
+          "op": "test_data",
+          "input_bags": [
+            {"name": "module_input"}
+          ],
+          "output_bags": [
+            {
+              "name": "test_data_bag",
+              "required": true,
+              "tags": {
+                "module_key": "${params.module_key}",
+                "tester_alias": "${agents.tester}"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_test_code",
+      "kind": "subpipeline",
+      "name": "test module code with full repair",
+      "namespace": {
+        "agents": [
+          {"name": "coder", "role": "coder"},
+          {"name": "tester", "role": "tester"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "coder", "role": "coder"},
+          {"name": "tester", "role": "tester"}
+        ],
+        "input_bags": [
+          {"name": "module_input"},
+          {"name": "code_bag"},
+          {"name": "test_data_bag"}
+        ],
+        "output_bags": [
+          {"name": "tested_module", "indexed_by": ["module_key"]},
+          {"name": "code_bag", "indexed_by": ["module_key", "coder_alias"]},
+          {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report", "indexed_by": ["module_key"]}]}
+        ],
+        "exported_handlers": [
+          {
+            "name": "full_module_repair",
+            "handler": "full_module_repair",
+            "handles": ["kbug"],
+            "replaces": [
+              {"name": "code_bag", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+            ],
+            "indexed_by": ["module_key"]
+          }
+        ]
+      },
+      "handlers": [
+        {
+          "name": "full_module_repair",
+          "handles": ["kbug"],
+          "transition": "full_module_repair",
+          "input_bags": [
+            {"name": "module_input", "source": "owner_input"},
+            {"name": "code_bag", "source": "owner_output"},
+            {"name": "test_data_bag", "source": "owner_output"},
+            {"name": "failure_report", "source": "exception"}
+          ],
+          "replace_bags": [
+            {"name": "code_bag"},
+            {"name": "test_data_bag"}
+          ],
+          "resume": {"type": "retry_failed_transition"}
+        }
+      ],
+      "start_state": "module_test_input_ready",
+      "delivery_state": "module_tested",
+      "states": [
+        {
+          "id": "module_test_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["test_code"]}
+        },
+        {
+          "id": "test_code_done",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "test_code"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_transition": "test_code", "indexed_by": ["module_key"]},
+              {"name": "failure_report", "from_transition": "test_code", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "test_code",
+            "cases": {
+              "kok": {"enter_state": "module_tested", "ref": {"mode": "advance"}},
+              "kbug": {"transitions": ["full_module_repair"], "ref": {"mode": "recover", "include_failure_report": true}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "full_module_repaired",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "full_module_repair"},
+          "exposes": {
+            "bags": [
+              {"name": "code_bag", "from_transition": "full_module_repair", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "from_transition": "full_module_repair", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "full_module_repair",
+            "cases": {
+              "kok": {"enter_state": "module_test_input_ready", "ref": {"mode": "recover"}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "module_tested",
+          "kind": "delivery",
+          "proof": {"type": "accepted_result", "source_state": "test_code_done", "result": "kok"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_state": "test_code_done", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "module_test_input_ready", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "from_state": "module_test_input_ready", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "test_code",
+          "kind": "task",
+          "from_state": "module_test_input_ready",
+          "to_state": "test_code_done",
+          "agent": {"role": "tester", "alias": "tester"},
+          "op": "test_code",
+          "input_bags": [
+            {"name": "module_input"},
+            {"name": "code_bag"},
+            {"name": "test_data_bag"}
+          ],
+          "output_bags_by_result": {
+            "kok": [
+              {"name": "tested_module", "required": true, "tags": {"module_key": "${params.module_key}"}}
+            ],
+            "kbug": [
+              {"name": "failure_report", "required": true, "tags": {"module_key": "${params.module_key}"}}
+            ]
+          }
+        },
+        {
+          "id": "full_module_repair",
+          "kind": "task",
+          "from_state": "test_code_done",
+          "to_state": "full_module_repaired",
+          "agent": {"role": "coder", "alias": "coder"},
+          "op": "repair_module",
+          "input_bags": [
+            {"name": "module_input"},
+            {"name": "code_bag"},
+            {"name": "test_data_bag"},
+            {"name": "failure_report", "from_state": "test_code_done"}
+          ],
+          "output_bags": [
+            {"name": "code_bag", "required": true, "tags": {"module_key": "${params.module_key}", "coder_alias": "${agents.coder}"}},
+            {"name": "test_data_bag", "required": true, "tags": {"module_key": "${params.module_key}", "tester_alias": "${agents.tester}"}}
+          ],
+          "limits": {"max_attempts": 3}
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_module",
+      "kind": "subpipeline",
+      "name": "module implementation and test",
+      "namespace": {
+        "agents": [
+          {"name": "coder", "role": "coder"},
+          {"name": "tester", "role": "tester"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "coder", "role": "coder"},
+          {"name": "tester", "role": "tester"}
+        ],
+        "input_bags": [
+          {"name": "module_input"}
+        ],
+        "output_bags": [
+          {"name": "tested_module", "indexed_by": ["module_key"]},
+          {"name": "code_bag", "indexed_by": ["module_key", "coder_alias"]},
+          {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report", "indexed_by": ["module_key"]}]}
+        ],
+        "exported_handlers": [
+          {
+            "name": "full_module_repair",
+            "handler": "full_module_repair",
+            "handles": ["kbug"],
+            "replaces": [
+              {"name": "code_bag", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+            ],
+            "indexed_by": ["module_key"]
+          }
+        ]
+      },
+      "handlers": [
+        {
+          "name": "full_module_repair",
+          "handles": ["kbug"],
+          "transition": "full_module_repair",
+          "input_bags": [
+            {"name": "module_input", "source": "owner_input"},
+            {"name": "code_bag", "source": "owner_output"},
+            {"name": "test_data_bag", "source": "owner_output"},
+            {"name": "failure_report", "source": "exception"}
+          ],
+          "replace_bags": [
+            {"name": "code_bag"},
+            {"name": "test_data_bag"}
+          ],
+          "resume": {"type": "retry_failed_transition"}
+        }
+      ],
+      "exception_handlers": {
+        "kbug": {
+          "select": "nearest_matching",
+          "join": "all_success",
+          "on_unhandled": "bubble",
+          "resume": {"type": "retry_failed_transition"}
+        }
+      },
+      "start_state": "module_input_ready",
+      "delivery_state": "module_tested",
+      "states": [
+        {
+          "id": "module_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["write_code", "write_test_data"]}
+        },
+        {
+          "id": "code_written",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "write_code"},
+          "exposes": {
+            "bags": [
+              {"name": "code_bag", "from_transition": "write_code", "indexed_by": ["module_key", "coder_alias"]}
+            ]
+          }
+        },
+        {
+          "id": "test_data_written",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "write_test_data"},
+          "exposes": {
+            "bags": [
+              {"name": "test_data_bag", "from_transition": "write_test_data", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          }
+        },
+        {
+          "id": "module_test_input_ready",
+          "kind": "aggregate",
+          "proof": {
+            "type": "aggregate",
+            "mode": "join_bags",
+            "join_by": ["module_key"],
+            "sources": [
+              {"state": "code_written", "name": "code_bag"},
+              {"state": "test_data_written", "name": "test_data_bag"}
+            ]
+          },
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "from_state": "module_input_ready", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "code_written", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "from_state": "test_data_written", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["test_code"]}
+        },
+        {
+          "id": "module_tested",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "test_code"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_transition": "test_code", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "code_written", "indexed_by": ["module_key", "coder_alias"]},
+              {"name": "test_data_bag", "from_state": "test_data_written", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_code",
+          "kind": "call",
+          "from_state": "module_input_ready",
+          "to_state": "code_written",
+          "pipeline_id": "pipeline_write_code",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {"coder": "${agents.coder}"},
+            "input_bags": {"module_input": {"from_state": "module_input_ready", "name": "module_input"}}
+          },
+          "output_bags": [
+            {"name": "code_bag", "from_return": "code_bag", "required": true, "indexed_by": ["module_key", "coder_alias"]}
+          ]
+        },
+        {
+          "id": "write_test_data",
+          "kind": "call",
+          "from_state": "module_input_ready",
+          "to_state": "test_data_written",
+          "pipeline_id": "pipeline_write_test_data",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {"tester": "${agents.tester}"},
+            "input_bags": {"module_input": {"from_state": "module_input_ready", "name": "module_input"}}
+          },
+          "output_bags": [
+            {"name": "test_data_bag", "from_return": "test_data_bag", "required": true, "indexed_by": ["module_key", "tester_alias"]}
+          ]
+        },
+        {
+          "id": "test_code",
+          "kind": "call",
+          "from_state": "module_test_input_ready",
+          "to_state": "module_tested",
+          "pipeline_id": "pipeline_test_code",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {
+              "coder": "${agents.coder}",
+              "tester": "${agents.tester}"
+            },
+            "input_bags": {
+              "module_input": {"from_state": "module_test_input_ready", "name": "module_input"},
+              "code_bag": {"from_state": "module_test_input_ready", "name": "code_bag"},
+              "test_data_bag": {"from_state": "module_test_input_ready", "name": "test_data_bag"}
+            }
+          },
+          "output_bags": [
+            {"name": "tested_module", "from_return": "tested_module", "required": true, "indexed_by": ["module_key"]},
+            {"name": "code_bag", "from_return": "code_bag", "required": true, "indexed_by": ["module_key", "coder_alias"]},
+            {"name": "test_data_bag", "from_return": "test_data_bag", "required": true, "indexed_by": ["module_key", "tester_alias"]}
+          ],
+          "output_handlers": [
+            {"name": "full_module_repair", "from_handler": "full_module_repair", "indexed_by": ["module_key"]}
+          ]
+        },
+        {
+          "id": "full_module_repair",
+          "kind": "task",
+          "from_state": "module_tested",
+          "to_state": "module_test_input_ready",
+          "agent": {"role": "coder", "alias": "coder"},
+          "op": "repair_module",
+          "output_bags": [
+            {"name": "code_bag", "required": true},
+            {"name": "test_data_bag", "required": true}
+          ],
+          "limits": {"max_attempts": 3}
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_backend_module_group",
+      "kind": "subpipeline",
+      "name": "backend module group",
+      "namespace": {
+        "agents": [
+          {"name": "coder", "role": "coder"},
+          {"name": "tester", "role": "tester"}
+        ]
+      },
+      "signature": {
+        "agents": [
+          {"name": "coder", "role": "coder"},
+          {"name": "tester", "role": "tester"}
+        ],
+        "input_bags": [
+          {"name": "module_input", "collection": true, "indexed_by": ["module_key"]}
+        ],
+        "output_bags": [
+          {"name": "tested_module", "collection": true, "indexed_by": ["module_key"]},
+          {"name": "code_bag", "collection": true, "indexed_by": ["module_key"]},
+          {"name": "test_data_bag", "collection": true, "indexed_by": ["module_key"]}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report", "indexed_by": ["module_key"]}]}
+        ]
+      },
+      "start_state": "backend_modules_ready",
+      "delivery_state": "backend_modules_done",
+      "states": [
+        {
+          "id": "backend_modules_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "collection": true, "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["run_backend_modules"]}
+        },
+        {
+          "id": "backend_modules_done",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "run_backend_modules"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_transition": "run_backend_modules", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_transition": "run_backend_modules", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "test_data_bag", "from_transition": "run_backend_modules", "collection": true, "indexed_by": ["module_key"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "run_backend_modules",
+          "kind": "call",
+          "from_state": "backend_modules_ready",
+          "to_state": "backend_modules_done",
+          "pipeline_id": "pipeline_module",
+          "mode": "foreach",
+          "foreach": {
+            "items_from": {"state": "backend_modules_ready", "name": "module_input"},
+            "item_key": "module_key"
+          },
+          "bindings": {
+            "params": {"module_key": "${foreach.module_key}"},
+            "agent_bindings": {
+              "coder": "${agents.coder}",
+              "tester": "${agents.tester}"
+            },
+            "input_bags": {"module_input": {"from_state": "backend_modules_ready", "name": "module_input"}}
+          },
+          "output_bags": [
+            {"name": "tested_module", "from_return": "tested_module", "collection": true, "indexed_by": ["module_key"]},
+            {"name": "code_bag", "from_return": "code_bag", "collection": true, "indexed_by": ["module_key", "coder_alias"]},
+            {"name": "test_data_bag", "from_return": "test_data_bag", "collection": true, "indexed_by": ["module_key", "tester_alias"]}
+          ],
+          "output_handlers": [
+            {"name": "full_module_repair", "from_handler": "full_module_repair", "indexed_by": ["module_key"]}
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_front_write_code",
+      "kind": "subpipeline",
+      "name": "write frontend code",
+      "namespace": {
+        "agents": [
+          {"name": "front", "role": "front"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "front", "role": "front"}
+        ],
+        "input_bags": [
+          {"name": "module_input"}
+        ],
+        "output_bags": [
+          {"name": "code_bag", "indexed_by": ["module_key", "front_alias"]}
+        ]
+      },
+      "start_state": "module_input_ready",
+      "delivery_state": "code_written",
+      "states": [
+        {
+          "id": "module_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["write_code"]}
+        },
+        {
+          "id": "code_written",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "write_code"},
+          "exposes": {
+            "bags": [
+              {"name": "code_bag", "from_transition": "write_code", "indexed_by": ["module_key", "front_alias"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_code",
+          "kind": "task",
+          "from_state": "module_input_ready",
+          "to_state": "code_written",
+          "agent": {"role": "front", "alias": "front"},
+          "op": "write_code",
+          "input_bags": [
+            {"name": "module_input"}
+          ],
+          "output_bags": [
+            {"name": "code_bag", "required": true, "tags": {"module_key": "${params.module_key}", "front_alias": "${agents.front}"}}
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_front_test_code",
+      "kind": "subpipeline",
+      "name": "test frontend code with full repair",
+      "namespace": {
+        "agents": [
+          {"name": "front", "role": "front"},
+          {"name": "tester", "role": "tester"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "front", "role": "front"},
+          {"name": "tester", "role": "tester"}
+        ],
+        "input_bags": [
+          {"name": "module_input"},
+          {"name": "code_bag"},
+          {"name": "test_data_bag"}
+        ],
+        "output_bags": [
+          {"name": "tested_module", "indexed_by": ["module_key"]},
+          {"name": "code_bag", "indexed_by": ["module_key", "front_alias"]},
+          {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report", "indexed_by": ["module_key"]}]}
+        ],
+        "exported_handlers": [
+          {
+            "name": "full_front_module_repair",
+            "handler": "full_front_module_repair",
+            "handles": ["kbug"],
+            "replaces": [
+              {"name": "code_bag", "indexed_by": ["module_key", "front_alias"]},
+              {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+            ],
+            "indexed_by": ["module_key"]
+          }
+        ]
+      },
+      "handlers": [
+        {
+          "name": "full_front_module_repair",
+          "handles": ["kbug"],
+          "transition": "full_front_module_repair",
+          "input_bags": [
+            {"name": "module_input", "source": "owner_input"},
+            {"name": "code_bag", "source": "owner_output"},
+            {"name": "test_data_bag", "source": "owner_output"},
+            {"name": "failure_report", "source": "exception"}
+          ],
+          "replace_bags": [
+            {"name": "code_bag"},
+            {"name": "test_data_bag"}
+          ],
+          "resume": {"type": "retry_failed_transition"}
+        }
+      ],
+      "start_state": "module_test_input_ready",
+      "delivery_state": "module_tested",
+      "states": [
+        {
+          "id": "module_test_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "indexed_by": ["module_key", "front_alias"]},
+              {"name": "test_data_bag", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["test_code"]}
+        },
+        {
+          "id": "test_code_done",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "test_code"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_transition": "test_code", "indexed_by": ["module_key"]},
+              {"name": "failure_report", "from_transition": "test_code", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "test_code",
+            "cases": {
+              "kok": {"enter_state": "module_tested", "ref": {"mode": "advance"}},
+              "kbug": {"transitions": ["full_front_module_repair"], "ref": {"mode": "recover", "include_failure_report": true}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "full_front_module_repaired",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "full_front_module_repair"},
+          "exposes": {
+            "bags": [
+              {"name": "code_bag", "from_transition": "full_front_module_repair", "indexed_by": ["module_key", "front_alias"]},
+              {"name": "test_data_bag", "from_transition": "full_front_module_repair", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "full_front_module_repair",
+            "cases": {
+              "kok": {"enter_state": "module_test_input_ready", "ref": {"mode": "recover"}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "module_tested",
+          "kind": "delivery",
+          "proof": {"type": "accepted_result", "source_state": "test_code_done", "result": "kok"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_state": "test_code_done", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "module_test_input_ready", "indexed_by": ["module_key", "front_alias"]},
+              {"name": "test_data_bag", "from_state": "module_test_input_ready", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "test_code",
+          "kind": "task",
+          "from_state": "module_test_input_ready",
+          "to_state": "test_code_done",
+          "agent": {"role": "tester", "alias": "tester"},
+          "op": "test_code",
+          "input_bags": [
+            {"name": "module_input"},
+            {"name": "code_bag"},
+            {"name": "test_data_bag"}
+          ],
+          "output_bags_by_result": {
+            "kok": [
+              {"name": "tested_module", "required": true, "tags": {"module_key": "${params.module_key}"}}
+            ],
+            "kbug": [
+              {"name": "failure_report", "required": true, "tags": {"module_key": "${params.module_key}"}}
+            ]
+          }
+        },
+        {
+          "id": "full_front_module_repair",
+          "kind": "task",
+          "from_state": "test_code_done",
+          "to_state": "full_front_module_repaired",
+          "agent": {"role": "front", "alias": "front"},
+          "op": "repair_front_module",
+          "input_bags": [
+            {"name": "module_input"},
+            {"name": "code_bag"},
+            {"name": "test_data_bag"},
+            {"name": "failure_report", "from_state": "test_code_done"}
+          ],
+          "output_bags": [
+            {"name": "code_bag", "required": true, "tags": {"module_key": "${params.module_key}", "front_alias": "${agents.front}"}},
+            {"name": "test_data_bag", "required": true, "tags": {"module_key": "${params.module_key}", "tester_alias": "${agents.tester}"}}
+          ],
+          "limits": {"max_attempts": 3}
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_front_preview_review",
+      "kind": "subpipeline",
+      "name": "frontend preview review",
+      "namespace": {
+        "agents": [
+          {"name": "front", "role": "front"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "front", "role": "front"}
+        ],
+        "input_bags": [
+          {"name": "module_input"},
+          {"name": "code_bag"},
+          {"name": "tested_module"}
+        ],
+        "output_bags": [
+          {"name": "preview_edit_bag", "indexed_by": ["module_key"]}
+        ]
+      },
+      "start_state": "preview_edit_needed",
+      "delivery_state": "front_preview_approved",
+      "states": [
+        {
+          "id": "preview_edit_needed",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "indexed_by": ["module_key"]},
+              {"name": "tested_module", "indexed_by": ["module_key"]},
+              {"name": "preview_feedback_bag", "from_state": "preview_reviewed", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["preview_edit"]}
+        },
+        {
+          "id": "preview_ready",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "preview_edit"},
+          "exposes": {
+            "bags": [
+              {"name": "preview_edit_bag", "from_transition": "preview_edit", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["user_preview_confirm"]}
+        },
+        {
+          "id": "preview_reviewed",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "user_preview_confirm"},
+          "exposes": {
+            "bags": [
+              {"name": "preview_feedback_bag", "from_transition": "user_preview_confirm", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "user_preview_confirm",
+            "cases": {
+              "kok": {"enter_state": "front_preview_approved", "ref": {"mode": "advance"}},
+              "krewrite": {"enter_state": "preview_edit_needed", "ref": {"mode": "advance"}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "front_preview_approved",
+          "kind": "delivery",
+          "proof": {"type": "accepted_result", "source_state": "preview_reviewed", "result": "kok"},
+          "exposes": {
+            "bags": [
+              {"name": "preview_edit_bag", "from_state": "preview_ready", "indexed_by": ["module_key"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "preview_edit",
+          "kind": "task",
+          "from_state": "preview_edit_needed",
+          "to_state": "preview_ready",
+          "agent": {"role": "front", "alias": "front"},
+          "op": "preview_edit",
+          "input_bags": [
+            {"name": "module_input"},
+            {"name": "code_bag"},
+            {"name": "tested_module"},
+            {"name": "preview_feedback_bag"}
+          ],
+          "output_bags": [
+            {"name": "preview_edit_bag", "required": true, "tags": {"module_key": "${params.module_key}"}}
+          ],
+          "limits": {"max_attempts": 20}
+        },
+        {
+          "id": "user_preview_confirm",
+          "kind": "task",
+          "from_state": "preview_ready",
+          "to_state": "preview_reviewed",
+          "agent": {"role": "front", "alias": "front"},
+          "op": "user_preview_confirm",
+          "input_bags": [
+            {"name": "module_input"},
+            {"name": "preview_edit_bag"}
+          ],
+          "output_bags_by_result": {
+            "krewrite": [
+              {"name": "preview_feedback_bag", "required": true, "tags": {"module_key": "${params.module_key}"}}
+            ]
+          },
+          "limits": {"max_attempts": 20}
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_front_module",
+      "kind": "subpipeline",
+      "name": "frontend module",
+      "namespace": {
+        "agents": [
+          {"name": "front", "role": "front"},
+          {"name": "tester", "role": "tester"}
+        ]
+      },
+      "signature": {
+        "params": ["module_key"],
+        "agents": [
+          {"name": "front", "role": "front"},
+          {"name": "tester", "role": "tester"}
+        ],
+        "input_bags": [
+          {"name": "module_input"}
+        ],
+        "output_bags": [
+          {"name": "tested_module", "indexed_by": ["module_key"]},
+          {"name": "code_bag", "indexed_by": ["module_key"]},
+          {"name": "preview_edit_bag", "indexed_by": ["module_key"]}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report", "indexed_by": ["module_key"]}]}
+        ]
+      },
+      "start_state": "module_input_ready",
+      "delivery_state": "front_preview_approved",
+      "states": [
+        {
+          "id": "module_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "indexed_by": ["module_key"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["write_code", "write_test_data"]}
+        },
+        {
+          "id": "code_written",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "write_code"},
+          "exposes": {
+            "bags": [
+              {"name": "code_bag", "from_transition": "write_code", "indexed_by": ["module_key", "front_alias"]}
+            ]
+          }
+        },
+        {
+          "id": "test_data_written",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "write_test_data"},
+          "exposes": {
+            "bags": [
+              {"name": "test_data_bag", "from_transition": "write_test_data", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          }
+        },
+        {
+          "id": "module_test_input_ready",
+          "kind": "aggregate",
+          "proof": {
+            "type": "aggregate",
+            "mode": "join_bags",
+            "join_by": ["module_key"],
+            "sources": [
+              {"state": "code_written", "name": "code_bag"},
+              {"state": "test_data_written", "name": "test_data_bag"}
+            ]
+          },
+          "exposes": {
+            "bags": [
+              {"name": "module_input", "from_state": "module_input_ready", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "code_written", "indexed_by": ["module_key", "front_alias"]},
+              {"name": "test_data_bag", "from_state": "test_data_written", "indexed_by": ["module_key", "tester_alias"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["test_code"]}
+        },
+        {
+          "id": "module_tested",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "test_code"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_transition": "test_code", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "code_written", "indexed_by": ["module_key", "front_alias"]}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["preview_review"]}
+        },
+        {
+          "id": "front_preview_approved",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "preview_review"},
+          "exposes": {
+            "bags": [
+              {"name": "tested_module", "from_state": "module_tested", "indexed_by": ["module_key"]},
+              {"name": "code_bag", "from_state": "code_written", "indexed_by": ["module_key"]},
+              {"name": "preview_edit_bag", "from_transition": "preview_review", "indexed_by": ["module_key"]}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_code",
+          "kind": "call",
+          "from_state": "module_input_ready",
+          "to_state": "code_written",
+          "pipeline_id": "pipeline_front_write_code",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {"front": "${agents.front}"},
+            "input_bags": {"module_input": {"from_state": "module_input_ready", "name": "module_input"}}
+          },
+          "output_bags": [
+            {"name": "code_bag", "from_return": "code_bag", "required": true, "indexed_by": ["module_key", "front_alias"]}
+          ]
+        },
+        {
+          "id": "write_test_data",
+          "kind": "call",
+          "from_state": "module_input_ready",
+          "to_state": "test_data_written",
+          "pipeline_id": "pipeline_write_test_data",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {"tester": "${agents.tester}"},
+            "input_bags": {"module_input": {"from_state": "module_input_ready", "name": "module_input"}}
+          },
+          "output_bags": [
+            {"name": "test_data_bag", "from_return": "test_data_bag", "required": true, "indexed_by": ["module_key", "tester_alias"]}
+          ]
+        },
+        {
+          "id": "test_code",
+          "kind": "call",
+          "from_state": "module_test_input_ready",
+          "to_state": "module_tested",
+          "pipeline_id": "pipeline_front_test_code",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {
+              "front": "${agents.front}",
+              "tester": "${agents.tester}"
+            },
+            "input_bags": {
+              "module_input": {"from_state": "module_test_input_ready", "name": "module_input"},
+              "code_bag": {"from_state": "module_test_input_ready", "name": "code_bag"},
+              "test_data_bag": {"from_state": "module_test_input_ready", "name": "test_data_bag"}
+            }
+          },
+          "output_bags": [
+            {"name": "tested_module", "from_return": "tested_module", "required": true, "indexed_by": ["module_key"]},
+            {"name": "code_bag", "from_return": "code_bag", "required": true, "indexed_by": ["module_key", "front_alias"]},
+            {"name": "test_data_bag", "from_return": "test_data_bag", "required": true, "indexed_by": ["module_key", "tester_alias"]}
+          ],
+          "output_handlers": [
+            {"name": "full_front_module_repair", "from_handler": "full_front_module_repair", "indexed_by": ["module_key"]}
+          ]
+        },
+        {
+          "id": "preview_review",
+          "kind": "call",
+          "from_state": "module_tested",
+          "to_state": "front_preview_approved",
+          "pipeline_id": "pipeline_front_preview_review",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "${params.module_key}"},
+            "agent_bindings": {"front": "${agents.front}"},
+            "input_bags": {
+              "module_input": {"from_state": "module_input_ready", "name": "module_input"},
+              "code_bag": {"from_state": "module_tested", "name": "code_bag"},
+              "tested_module": {"from_state": "module_tested", "name": "tested_module"}
+            }
+          },
+          "output_bags": [
+            {"name": "preview_edit_bag", "from_return": "preview_edit_bag", "required": true, "indexed_by": ["module_key"]}
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_global_test_data",
+      "kind": "subpipeline",
+      "name": "global test data",
+      "namespace": {
+        "agents": [
+          {"name": "architect", "role": "architect"}
+        ]
+      },
+      "signature": {
+        "agents": [
+          {"name": "architect", "role": "architect"}
+        ],
+        "input_bags": [
+          {"name": "global_test_input"}
+        ],
+        "output_bags": [
+          {"name": "global_test_data"}
+        ]
+      },
+      "start_state": "global_test_input_ready",
+      "delivery_state": "global_test_data_ready",
+      "states": [
+        {
+          "id": "global_test_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {"bags": [{"name": "global_test_input"}]},
+          "next": {"type": "all", "transitions": ["write_global_test_data"]}
+        },
+        {
+          "id": "global_test_data_ready",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "write_global_test_data"},
+          "exposes": {"bags": [{"name": "global_test_data", "from_transition": "write_global_test_data"}]}
+        }
+      ],
+      "transitions": [
+        {
+          "id": "write_global_test_data",
+          "kind": "task",
+          "from_state": "global_test_input_ready",
+          "to_state": "global_test_data_ready",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "test_data",
+          "input_bags": [{"name": "global_test_input"}],
+          "output_bags": [{"name": "global_test_data", "required": true}]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_merge_code",
+      "kind": "subpipeline",
+      "name": "merge code",
+      "namespace": {
+        "agents": [
+          {"name": "architect", "role": "architect"}
+        ]
+      },
+      "signature": {
+        "agents": [
+          {"name": "architect", "role": "architect"}
+        ],
+        "input_bags": [
+          {"name": "front_tested_module"},
+          {"name": "backend_tested_module", "collection": true},
+          {"name": "front_code_bag"},
+          {"name": "backend_code_bag", "collection": true},
+          {"name": "container_context"},
+          {"name": "global_test_input"}
+        ],
+        "output_bags": [
+          {"name": "merged_code"}
+        ]
+      },
+      "start_state": "merge_input_ready",
+      "delivery_state": "code_merged",
+      "states": [
+        {
+          "id": "merge_input_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "front_tested_module"},
+              {"name": "backend_tested_module", "collection": true},
+              {"name": "front_code_bag"},
+              {"name": "backend_code_bag", "collection": true},
+              {"name": "container_context"},
+              {"name": "global_test_input"}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["merge_code"]}
+        },
+        {
+          "id": "code_merged",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "merge_code"},
+          "exposes": {"bags": [{"name": "merged_code", "from_transition": "merge_code"}]}
+        }
+      ],
+      "transitions": [
+        {
+          "id": "merge_code",
+          "kind": "task",
+          "from_state": "merge_input_ready",
+          "to_state": "code_merged",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "merge_code",
+          "input_bags": [
+            {"name": "front_tested_module"},
+            {"name": "backend_tested_module", "collection": true},
+            {"name": "front_code_bag"},
+            {"name": "backend_code_bag", "collection": true},
+            {"name": "container_context"},
+            {"name": "global_test_input"}
+          ],
+          "output_bags": [{"name": "merged_code", "required": true}]
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_global_test_code",
+      "kind": "subpipeline",
+      "name": "global test code",
+      "namespace": {
+        "agents": [
+          {"name": "architect", "role": "architect"}
+        ]
+      },
+      "signature": {
+        "agents": [
+          {"name": "architect", "role": "architect"}
+        ],
+        "input_bags": [
+          {"name": "merged_code"},
+          {"name": "global_test_data"},
+          {"name": "container_context"}
+        ],
+        "output_bags": [
+          {"name": "global_test_report"},
+          {"name": "merged_code"}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report"}]}
+        ],
+        "exported_handlers": [
+          {
+            "name": "debug_global_code",
+            "handler": "debug_global_code",
+            "handles": ["kbug"],
+            "replaces": [{"name": "merged_code"}]
+          }
+        ]
+      },
+      "handlers": [
+        {
+          "name": "debug_global_code",
+          "handles": ["kbug"],
+          "transition": "debug_global_code",
+          "input_bags": [
+            {"name": "merged_code", "source": "owner_output"},
+            {"name": "global_test_data", "source": "owner_input"},
+            {"name": "container_context", "source": "owner_input"},
+            {"name": "failure_report", "source": "exception"}
+          ],
+          "replace_bags": [{"name": "merged_code"}],
+          "resume": {"type": "retry_failed_transition"}
+        }
+      ],
+      "start_state": "global_test_ready",
+      "delivery_state": "global_tested",
+      "states": [
+        {
+          "id": "global_test_ready",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "exposes": {
+            "bags": [
+              {"name": "merged_code"},
+              {"name": "global_test_data"},
+              {"name": "container_context"}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["global_test_code"]}
+        },
+        {
+          "id": "global_test_code_done",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "global_test_code"},
+          "exposes": {
+            "bags": [
+              {"name": "global_test_report", "from_transition": "global_test_code"},
+              {"name": "failure_report", "from_transition": "global_test_code"}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "global_test_code",
+            "cases": {
+              "kok": {"enter_state": "global_tested", "ref": {"mode": "advance"}},
+              "kbug": {"transitions": ["debug_global_code"], "ref": {"mode": "recover", "include_failure_report": true}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "global_code_repaired",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "debug_global_code"},
+          "exposes": {"bags": [{"name": "merged_code", "from_transition": "debug_global_code"}]},
+          "next": {
+            "type": "by_result",
+            "source_transition": "debug_global_code",
+            "cases": {
+              "kok": {"enter_state": "global_test_ready", "ref": {"mode": "recover"}},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "global_tested",
+          "kind": "delivery",
+          "proof": {"type": "accepted_result", "source_state": "global_test_code_done", "result": "kok"},
+          "exposes": {
+            "bags": [
+              {"name": "global_test_report", "from_state": "global_test_code_done"},
+              {"name": "merged_code", "from_state": "global_test_ready"}
+            ]
+          }
+        }
+      ],
+      "transitions": [
+        {
+          "id": "global_test_code",
+          "kind": "task",
+          "from_state": "global_test_ready",
+          "to_state": "global_test_code_done",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "test_code",
+          "input_bags": [
+            {"name": "merged_code"},
+            {"name": "global_test_data"},
+            {"name": "container_context"}
+          ],
+          "output_bags_by_result": {
+            "kok": [{"name": "global_test_report", "required": true}],
+            "kbug": [{"name": "failure_report", "required": true}]
+          }
+        },
+        {
+          "id": "debug_global_code",
+          "kind": "task",
+          "from_state": "global_test_code_done",
+          "to_state": "global_code_repaired",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "debug_global_code",
+          "input_bags": [
+            {"name": "merged_code"},
+            {"name": "global_test_data"},
+            {"name": "container_context"},
+            {"name": "failure_report", "from_state": "global_test_code_done"}
+          ],
+          "output_bags": [{"name": "merged_code", "required": true}],
+          "limits": {"max_attempts": 3}
+        }
+      ]
+    },
+    {
+      "schema_version": "devflow.pipeline/v0.4",
+      "pipeline_id": "pipeline_full_delivery",
+      "kind": "entry",
+      "name": "full delivery",
+      "namespace": {
+        "agents": [
+          {"name": "ceo", "role": "ceo", "default_agent_id": "ceo"},
+          {"name": "pm", "role": "pm", "default_agent_id": "pm01"},
+          {"name": "architect", "role": "architect", "default_agent_id": "architect01"},
+          {"name": "front", "role": "front", "default_agent_id": "front01"},
+          {"name": "coder", "role": "coder", "default_agent_id": "coder01"},
+          {"name": "tester", "role": "tester", "default_agent_id": "tester01"}
+        ]
+      },
+      "signature": {
+        "output_bags": [
+          {"name": "global_test_report"}
+        ],
+        "throws": [
+          {"result": "kbug", "bags": [{"name": "failure_report"}]}
+        ]
+      },
+      "start_state": "delivery_start",
+      "delivery_state": "delivery_done",
+      "states": [
+        {
+          "id": "delivery_start",
+          "kind": "start",
+          "proof": {"type": "external"},
+          "next": {"type": "all", "transitions": ["ceo_write_requirement"]}
+        },
+        {
+          "id": "requirement_ready",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "ceo_write_requirement"},
+          "exposes": {"bags": [{"name": "requirement", "from_transition": "ceo_write_requirement"}]},
+          "next": {"type": "all", "transitions": ["pm_write_product_plan"]}
+        },
+        {
+          "id": "product_plan_ready",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "pm_write_product_plan"},
+          "exposes": {"bags": [{"name": "product_plan", "from_transition": "pm_write_product_plan"}]},
+          "next": {"type": "all", "transitions": ["ceo_review_product_plan"]}
+        },
+        {
+          "id": "product_plan_approved",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "ceo_review_product_plan"},
+          "next": {"type": "all", "transitions": ["architect_write_architecture"]}
+        },
+        {
+          "id": "architecture_ready",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "architect_write_architecture"},
+          "exposes": {"bags": [{"name": "architecture", "from_transition": "architect_write_architecture"}]},
+          "next": {"type": "all", "transitions": ["pm_review_architecture"]}
+        },
+        {
+          "id": "architecture_approved",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "pm_review_architecture"},
+          "next": {"type": "all", "transitions": ["architect_create_container"]}
+        },
+        {
+          "id": "container_ready",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "architect_create_container"},
+          "exposes": {"bags": [{"name": "container_context", "from_transition": "architect_create_container"}]},
+          "next": {"type": "all", "transitions": ["architect_split_modules"]}
+        },
+        {
+          "id": "split_done",
+          "kind": "decision",
+          "proof": {"type": "transition_result", "transition": "architect_split_modules"},
+          "exposes": {
+            "bags": [
+              {"name": "front_module_input", "from_transition": "architect_split_modules", "indexed_by": ["module_key"]},
+              {"name": "backend_module_input", "from_transition": "architect_split_modules", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "global_test_input", "from_transition": "architect_split_modules"}
+            ]
+          },
+          "next": {
+            "type": "by_result",
+            "source_transition": "architect_split_modules",
+            "cases": {
+              "kok": {"transitions": ["run_front_module", "run_backend_module_group", "run_global_test_data"]},
+              "kfail": {"action": "fail_run", "ref": {"mode": "fail_run"}}
+            }
+          }
+        },
+        {
+          "id": "front_module_done",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "run_front_module"},
+          "exposes": {
+            "bags": [
+              {"name": "front_tested_module", "from_transition": "run_front_module", "indexed_by": ["module_key"]},
+              {"name": "front_code_bag", "from_transition": "run_front_module", "indexed_by": ["module_key"]},
+              {"name": "preview_edit_bag", "from_transition": "run_front_module", "indexed_by": ["module_key"]}
+            ]
+          }
+        },
+        {
+          "id": "backend_group_done",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "run_backend_module_group"},
+          "exposes": {
+            "bags": [
+              {"name": "backend_tested_module", "from_transition": "run_backend_module_group", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "backend_code_bag", "from_transition": "run_backend_module_group", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "backend_test_data_bag", "from_transition": "run_backend_module_group", "collection": true, "indexed_by": ["module_key"]}
+            ]
+          }
+        },
+        {
+          "id": "global_test_data_done",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "run_global_test_data"},
+          "exposes": {"bags": [{"name": "global_test_data", "from_transition": "run_global_test_data"}]}
+        },
+        {
+          "id": "merge_ready",
+          "kind": "aggregate",
+          "proof": {
+            "type": "aggregate",
+            "mode": "all",
+            "states": ["front_module_done", "backend_group_done", "global_test_data_done"]
+          },
+          "exposes": {
+            "bags": [
+              {"name": "front_tested_module", "from_state": "front_module_done", "indexed_by": ["module_key"]},
+              {"name": "backend_tested_module", "from_state": "backend_group_done", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "front_code_bag", "from_state": "front_module_done", "indexed_by": ["module_key"]},
+              {"name": "backend_code_bag", "from_state": "backend_group_done", "collection": true, "indexed_by": ["module_key"]},
+              {"name": "container_context", "from_state": "container_ready"},
+              {"name": "global_test_input", "from_state": "split_done"},
+              {"name": "global_test_data", "from_state": "global_test_data_done"}
+            ]
+          },
+          "next": {"type": "all", "transitions": ["merge_code"]}
+        },
+        {
+          "id": "code_merged",
+          "kind": "state",
+          "proof": {"type": "transition_result", "transition": "merge_code"},
+          "exposes": {"bags": [{"name": "merged_code", "from_transition": "merge_code"}]},
+          "next": {"type": "all", "transitions": ["global_test_code"]}
+        },
+        {
+          "id": "delivery_done",
+          "kind": "delivery",
+          "proof": {"type": "transition_result", "transition": "global_test_code"},
+          "exposes": {"bags": [{"name": "global_test_report", "from_transition": "global_test_code"}]}
+        }
+      ],
+      "transitions": [
+        {
+          "id": "ceo_write_requirement",
+          "kind": "task",
+          "from_state": "delivery_start",
+          "to_state": "requirement_ready",
+          "agent": {"role": "ceo", "alias": "ceo"},
+          "op": "write_plan",
+          "output_bags": [{"name": "requirement", "required": true}]
+        },
+        {
+          "id": "pm_write_product_plan",
+          "kind": "task",
+          "from_state": "requirement_ready",
+          "to_state": "product_plan_ready",
+          "agent": {"role": "pm", "alias": "pm"},
+          "op": "write_plan",
+          "input_bags": [{"name": "requirement", "from_state": "requirement_ready"}],
+          "output_bags": [{"name": "product_plan", "required": true}]
+        },
+        {
+          "id": "ceo_review_product_plan",
+          "kind": "task",
+          "from_state": "product_plan_ready",
+          "to_state": "product_plan_approved",
+          "agent": {"role": "ceo", "alias": "ceo"},
+          "op": "review_plan",
+          "input_bags": [{"name": "product_plan", "from_state": "product_plan_ready"}]
+        },
+        {
+          "id": "architect_write_architecture",
+          "kind": "task",
+          "from_state": "product_plan_approved",
+          "to_state": "architecture_ready",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "write_plan",
+          "input_bags": [{"name": "product_plan", "from_state": "product_plan_ready"}],
+          "output_bags": [{"name": "architecture", "required": true}]
+        },
+        {
+          "id": "pm_review_architecture",
+          "kind": "task",
+          "from_state": "architecture_ready",
+          "to_state": "architecture_approved",
+          "agent": {"role": "pm", "alias": "pm"},
+          "op": "review_plan",
+          "input_bags": [{"name": "architecture", "from_state": "architecture_ready"}]
+        },
+        {
+          "id": "architect_create_container",
+          "kind": "task",
+          "from_state": "architecture_approved",
+          "to_state": "container_ready",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "create_container",
+          "input_bags": [{"name": "architecture", "from_state": "architecture_ready"}],
+          "output_bags": [{"name": "container_context", "required": true}]
+        },
+        {
+          "id": "architect_split_modules",
+          "kind": "task",
+          "from_state": "container_ready",
+          "to_state": "split_done",
+          "agent": {"role": "architect", "alias": "architect"},
+          "op": "split_module",
+          "input_bags": [
+            {"name": "architecture", "from_state": "architecture_ready"},
+            {"name": "container_context", "from_state": "container_ready"}
+          ],
+          "output_bags": [
+            {"name": "front_module_input", "required": true, "indexed_by": ["module_key"]},
+            {"name": "backend_module_input", "collection": true, "required": true, "indexed_by": ["module_key"]},
+            {"name": "global_test_input", "required": true}
+          ]
+        },
+        {
+          "id": "run_front_module",
+          "kind": "call",
+          "from_state": "split_done",
+          "to_state": "front_module_done",
+          "pipeline_id": "pipeline_front_module",
+          "mode": "single",
+          "bindings": {
+            "params": {"module_key": "front"},
+            "agent_bindings": {
+              "front": "${agents.front}",
+              "tester": "${agents.tester}"
+            },
+            "input_bags": {"module_input": {"from_state": "split_done", "name": "front_module_input"}}
+          },
+          "output_bags": [
+            {"name": "front_tested_module", "from_return": "tested_module", "required": true, "indexed_by": ["module_key"]},
+            {"name": "front_code_bag", "from_return": "code_bag", "required": true, "indexed_by": ["module_key"]},
+            {"name": "preview_edit_bag", "from_return": "preview_edit_bag", "required": true, "indexed_by": ["module_key"]}
+          ]
+        },
+        {
+          "id": "run_backend_module_group",
+          "kind": "call",
+          "from_state": "split_done",
+          "to_state": "backend_group_done",
+          "pipeline_id": "pipeline_backend_module_group",
+          "mode": "single",
+          "bindings": {
+            "agent_bindings": {
+              "coder": "${agents.coder}",
+              "tester": "${agents.tester}"
+            },
+            "input_bags": {"module_input": {"from_state": "split_done", "name": "backend_module_input"}}
+          },
+          "output_bags": [
+            {"name": "backend_tested_module", "from_return": "tested_module", "collection": true, "required": true, "indexed_by": ["module_key"]},
+            {"name": "backend_code_bag", "from_return": "code_bag", "collection": true, "required": true, "indexed_by": ["module_key"]},
+            {"name": "backend_test_data_bag", "from_return": "test_data_bag", "collection": true, "required": true, "indexed_by": ["module_key"]}
+          ]
+        },
+        {
+          "id": "run_global_test_data",
+          "kind": "call",
+          "from_state": "split_done",
+          "to_state": "global_test_data_done",
+          "pipeline_id": "pipeline_global_test_data",
+          "mode": "single",
+          "bindings": {
+            "agent_bindings": {"architect": "${agents.architect}"},
+            "input_bags": {"global_test_input": {"from_state": "split_done", "name": "global_test_input"}}
+          },
+          "output_bags": [
+            {"name": "global_test_data", "from_return": "global_test_data", "required": true}
+          ]
+        },
+        {
+          "id": "merge_code",
+          "kind": "call",
+          "from_state": "merge_ready",
+          "to_state": "code_merged",
+          "pipeline_id": "pipeline_merge_code",
+          "mode": "single",
+          "bindings": {
+            "agent_bindings": {"architect": "${agents.architect}"},
+            "input_bags": {
+              "front_tested_module": {"from_state": "merge_ready", "name": "front_tested_module"},
+              "backend_tested_module": {"from_state": "merge_ready", "name": "backend_tested_module"},
+              "front_code_bag": {"from_state": "merge_ready", "name": "front_code_bag"},
+              "backend_code_bag": {"from_state": "merge_ready", "name": "backend_code_bag"},
+              "container_context": {"from_state": "merge_ready", "name": "container_context"},
+              "global_test_input": {"from_state": "merge_ready", "name": "global_test_input"}
+            }
+          },
+          "output_bags": [
+            {"name": "merged_code", "from_return": "merged_code", "required": true}
+          ]
+        },
+        {
+          "id": "global_test_code",
+          "kind": "call",
+          "from_state": "code_merged",
+          "to_state": "delivery_done",
+          "pipeline_id": "pipeline_global_test_code",
+          "mode": "single",
+          "bindings": {
+            "agent_bindings": {"architect": "${agents.architect}"},
+            "input_bags": {
+              "merged_code": {"from_state": "code_merged", "name": "merged_code"},
+              "global_test_data": {"from_state": "merge_ready", "name": "global_test_data"},
+              "container_context": {"from_state": "merge_ready", "name": "container_context"}
+            }
+          },
+          "output_bags": [
+            {"name": "global_test_report", "from_return": "global_test_report", "required": true},
+            {"name": "merged_code", "from_return": "merged_code", "required": true}
+          ],
+          "output_handlers": [
+            {"name": "debug_global_code", "from_handler": "debug_global_code"}
+          ]
+        }
+      ]
+    }
+  ]
+}

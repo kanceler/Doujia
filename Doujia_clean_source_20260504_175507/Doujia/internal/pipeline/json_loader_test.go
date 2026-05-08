@@ -1,13 +1,12 @@
 package pipeline
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := fullDeliveryRegistryPath()
 	spec, err := LoadRegistrySpec(path)
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
@@ -18,7 +17,7 @@ func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
 	if spec.EntryPipelineID != "pipeline_full_delivery" {
 		t.Fatalf("entry pipeline = %q, want pipeline_full_delivery", spec.EntryPipelineID)
 	}
-	if got, want := len(spec.PipelineDefs), 8; got != want {
+	if got, want := len(spec.PipelineDefs), 13; got != want {
 		t.Fatalf("pipeline defs = %d, want %d", got, want)
 	}
 	entry, ok := spec.Pipeline("pipeline_full_delivery")
@@ -28,8 +27,8 @@ func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
 	if entry.StartState != "delivery_start" || entry.DeliveryState != "delivery_done" {
 		t.Fatalf("entry start/delivery = %s/%s", entry.StartState, entry.DeliveryState)
 	}
-	if !hasTransition(entry, "test_all_modules", "call") {
-		t.Fatalf("entry pipeline should contain test_all_modules call transition")
+	if !hasTransition(entry, "run_backend_module_group", "call") {
+		t.Fatalf("entry pipeline should contain run_backend_module_group call transition")
 	}
 	if !hasTransition(entry, "architect_create_container", "task") {
 		t.Fatalf("entry pipeline should contain architect_create_container task transition")
@@ -44,7 +43,7 @@ func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
 }
 
 func TestFullDeliveryMergeCodeCarriesRequiredContext(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := fullDeliveryRegistryPath()
 	spec, err := LoadRegistrySpec(path)
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
@@ -59,8 +58,8 @@ func TestFullDeliveryMergeCodeCarriesRequiredContext(t *testing.T) {
 	if !hasBag(mergePipeline.Signature.InputBags, "global_test_input") {
 		t.Fatalf("pipeline_merge_code signature input bags = %+v, want global_test_input", mergePipeline.Signature.InputBags)
 	}
-	if !hasBag(mergePipeline.Signature.InputBags, "code_bag") {
-		t.Fatalf("pipeline_merge_code signature input bags = %+v, want code_bag", mergePipeline.Signature.InputBags)
+	if !hasBag(mergePipeline.Signature.InputBags, "backend_code_bag") {
+		t.Fatalf("pipeline_merge_code signature input bags = %+v, want backend_code_bag", mergePipeline.Signature.InputBags)
 	}
 	mergeTransition, ok := transitionByID(mergePipeline, "merge_code")
 	if !ok {
@@ -72,8 +71,8 @@ func TestFullDeliveryMergeCodeCarriesRequiredContext(t *testing.T) {
 	if !hasBag(mergeTransition.InputBags, "global_test_input") {
 		t.Fatalf("pipeline_merge_code.merge_code input bags = %+v, want global_test_input", mergeTransition.InputBags)
 	}
-	if !hasBag(mergeTransition.InputBags, "code_bag") {
-		t.Fatalf("pipeline_merge_code.merge_code input bags = %+v, want code_bag", mergeTransition.InputBags)
+	if !hasBag(mergeTransition.InputBags, "backend_code_bag") {
+		t.Fatalf("pipeline_merge_code.merge_code input bags = %+v, want backend_code_bag", mergeTransition.InputBags)
 	}
 
 	entry, ok := spec.Pipeline("pipeline_full_delivery")
@@ -93,8 +92,8 @@ func TestFullDeliveryMergeCodeCarriesRequiredContext(t *testing.T) {
 	if _, ok := rootMerge.Bindings.InputBags["global_test_input"]; !ok {
 		t.Fatalf("pipeline_full_delivery.merge_code input bag bindings = %+v, want global_test_input", rootMerge.Bindings.InputBags)
 	}
-	if _, ok := rootMerge.Bindings.InputBags["code_bag"]; !ok {
-		t.Fatalf("pipeline_full_delivery.merge_code input bag bindings = %+v, want code_bag", rootMerge.Bindings.InputBags)
+	if _, ok := rootMerge.Bindings.InputBags["backend_code_bag"]; !ok {
+		t.Fatalf("pipeline_full_delivery.merge_code input bag bindings = %+v, want backend_code_bag", rootMerge.Bindings.InputBags)
 	}
 }
 

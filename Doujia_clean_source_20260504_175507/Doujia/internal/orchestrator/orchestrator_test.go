@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,11 +19,17 @@ import (
 	"devflow/internal/pipeline"
 	"devflow/internal/runtime"
 	"devflow/internal/state/repo"
+
+	_ "modernc.org/sqlite"
 )
+
+func fullDeliveryRegistryPathForTest() string {
+	return filepath.Join("testdata", "full_delivery", "pipeline_full_delivery.spec.json")
+}
 
 func TestLegacyPrefixSplitModuleDispatchUsesDeclaredHistoricalInputBags(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(fullDeliveryRegistryPathForTest())
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -68,9 +75,9 @@ func TestLegacyPrefixSplitModuleDispatchUsesDeclaredHistoricalInputBags(t *testi
 
 	feedbacks := []core.TaskMetaData{
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_write_requirement", AgentID: "ceo", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "requirement", ArtifactVersionIDs: []string{requirementVersionID}}}}},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_plan", AgentID: "pm01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "product_plan", ArtifactVersionIDs: []string{productPlanVersionID}}}}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_product_plan", AgentID: "pm01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "product_plan", ArtifactVersionIDs: []string{productPlanVersionID}}}}},
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_review_product_plan", AgentID: "ceo", Op: core.TaskOpReviewPlan, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_plan", AgentID: "architect01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "architecture", ArtifactVersionIDs: []string{architectureVersionID}}}}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_architecture", AgentID: "architect01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "architecture", ArtifactVersionIDs: []string{architectureVersionID}}}}},
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_review_architecture", AgentID: "pm01", Op: core.TaskOpReviewPlan, Result: core.TaskResultCodeOK},
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_create_container", AgentID: "architect01", Op: core.TaskOpCreateContainer, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "container_context", ArtifactVersionIDs: []string{containerContextVersionID}}}}},
 	}
@@ -80,12 +87,12 @@ func TestLegacyPrefixSplitModuleDispatchUsesDeclaredHistoricalInputBags(t *testi
 		}
 	}
 
-	splitTask, err := taskRepo.Get(ctx, runID, "split_module")
+	splitTask, err := taskRepo.Get(ctx, runID, "architect_split_modules")
 	if err != nil {
-		t.Fatalf("Get(split_module) error = %v", err)
+		t.Fatalf("Get(architect_split_modules) error = %v", err)
 	}
 	if splitTask.Status != core.TaskStatusDispatched {
-		t.Fatalf("split_module status = %s, want dispatched", splitTask.Status)
+		t.Fatalf("architect_split_modules status = %s, want dispatched", splitTask.Status)
 	}
 	inputsByName := make(map[string]string, len(splitTask.InputBags))
 	for _, bag := range splitTask.InputBags {
@@ -612,7 +619,7 @@ func TestPhaseTwoProtocolMockRecoverSucceedsAfterSingleBug(t *testing.T) {
 
 func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(fullDeliveryRegistryPathForTest())
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -622,6 +629,7 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 	}
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -633,6 +641,7 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_full_delivery_json_prefix"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -659,9 +668,9 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 
 	feedbacks := []core.TaskMetaData{
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_write_requirement", AgentID: "ceo", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/ceo/artifacts/requirement/requirement_v1.md"}, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_plan", AgentID: "pm01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/pm01/artifacts/prd/plan_v1.md"}, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_product_plan", AgentID: "pm01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/pm01/artifacts/prd/plan_v1.md"}, Result: core.TaskResultCodeOK},
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_review_product_plan", AgentID: "ceo", Op: core.TaskOpReviewPlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/pm01/artifacts/prd/plan_v1.md"}, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_plan", AgentID: "architect01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/architect01/artifacts/architecture/global_architecture_v1.md"}, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_architecture", AgentID: "architect01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/architect01/artifacts/architecture/global_architecture_v1.md"}, Result: core.TaskResultCodeOK},
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_review_architecture", AgentID: "pm01", Op: core.TaskOpReviewPlan, Result: core.TaskResultCodeOK},
 	}
 	for _, feedback := range feedbacks {
@@ -692,12 +701,12 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 		t.Fatalf("create_container feedback error = %v", err)
 	}
 
-	splitTask, err := taskRepo.Get(ctx, runID, "split_module")
+	splitTask, err := taskRepo.Get(ctx, runID, "architect_split_modules")
 	if err != nil {
-		t.Fatalf("Get(split_module) error = %v", err)
+		t.Fatalf("Get(architect_split_modules) error = %v", err)
 	}
 	if splitTask.Status != core.TaskStatusDispatched {
-		t.Fatalf("split_module status = %s, want dispatched", splitTask.Status)
+		t.Fatalf("architect_split_modules status = %s, want dispatched", splitTask.Status)
 	}
 	if countDispatchOp(dispatcher.dispatched, core.TaskOpSplitModule) != 1 {
 		t.Fatalf("dispatches = %+v, want one split_module dispatch", dispatcher.dispatched)
@@ -706,7 +715,7 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 
 func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(fullDeliveryRegistryPathForTest())
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -1456,6 +1465,48 @@ func TestPipelineInstanceTaskFeedbackEntersTransitionToStateBeforeCompletion(t *
 	}
 	if got := uniqueTestStrings(secondTask.InputBagIDs); !sameTestStringSet(got, firstTask.OutputBagIDs) {
 		t.Fatalf("second input bags = %v, want first output bags %v", got, firstTask.OutputBagIDs)
+	}
+	ref, err := doujiaGitRepo.GetRef(ctx, runID, doujiagit.DefaultRefName)
+	if err != nil {
+		t.Fatalf("GetRef(after first) error = %v", err)
+	}
+	if len(ref.FrontierMemberSnapshotIDs) != 1 {
+		t.Fatalf("frontier members after first = %#v, want first task snapshot", ref.FrontierMemberSnapshotIDs)
+	}
+	firstSnapshot, err := doujiaGitRepo.GetSnapshot(ctx, ref.FrontierMemberSnapshotIDs[0])
+	if err != nil {
+		t.Fatalf("GetSnapshot(after first) error = %v", err)
+	}
+	if firstSnapshot.TaskID != firstTaskID {
+		t.Fatalf("first snapshot task = %s, want %s", firstSnapshot.TaskID, firstTaskID)
+	}
+	if len(dispatcher.dispatched) != 1 {
+		t.Fatalf("dispatch count after first = %d, want second transition dispatch", len(dispatcher.dispatched))
+	}
+	if dispatcher.dispatched[0].SourceSnapshotID != firstSnapshot.SnapshotID ||
+		dispatcher.dispatched[0].SourceFrontierSnapshotID != ref.FrontierSnapshotID {
+		t.Fatalf("second dispatch provenance = %+v, want first snapshot/ref %+v/%+v", dispatcher.dispatched[0], firstSnapshot, ref)
+	}
+	// Phase 2 still dispatches the task selected by the pipeline transition graph;
+	// the committed fact only supplies provenance for that legacy scheduling decision.
+	if dispatcher.dispatched[0].TaskID != secondTaskID {
+		t.Fatalf("second dispatch task = %s, want transition-selected task %s", dispatcher.dispatched[0].TaskID, secondTaskID)
+	}
+	decision, err := doujiaGitRepo.GetSnapshotProcessingDecision(ctx, runID, doujiagit.DefaultRefName, firstSnapshot.SnapshotID)
+	if err != nil {
+		t.Fatalf("GetSnapshotProcessingDecision(first) error = %v", err)
+	}
+	if decision.Status != doujiagit.SnapshotProcessingStatusAdvanced {
+		t.Fatalf("first decision status = %s, want advanced", decision.Status)
+	}
+	if !reflect.DeepEqual(decision.ProducedTaskIDs, []string{string(secondTaskID)}) {
+		t.Fatalf("first produced task ids = %#v, want %s", decision.ProducedTaskIDs, secondTaskID)
+	}
+	if err := service.AdvanceActiveRefForTest(ctx, runID); err != nil {
+		t.Fatalf("AdvanceActiveRefForTest(after first) error = %v", err)
+	}
+	if len(dispatcher.dispatched) != 1 {
+		t.Fatalf("dispatch count after rerun = %d, want no duplicate second dispatch", len(dispatcher.dispatched))
 	}
 
 	secondVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "worker01", "final_output")
@@ -2601,6 +2652,7 @@ func TestOnFeedbackPersistsArtifactMetadata(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	artifactRepo := repo.NewMemoryArtifactRepository()
 	eventRepo := repo.NewMemoryEventRepository()
 	service := orchestrator.NewService(
@@ -2612,6 +2664,7 @@ func TestOnFeedbackPersistsArtifactMetadata(t *testing.T) {
 		&recordingSessionRuntime{},
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 	service.SetArtifactRepository(artifactRepo)
 	service.SetEventRepository(eventRepo)
 
@@ -2631,14 +2684,18 @@ func TestOnFeedbackPersistsArtifactMetadata(t *testing.T) {
 	}
 
 	const requirementURI = "projects/run_artifact_metadata/agents/ceo/artifacts/requirement/requirement_v1.md"
+	requirementVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "requirement")
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
-		Direction:    core.TaskDirectionFeedback,
-		RunID:        runID,
-		TaskID:       "task_01",
-		AgentID:      "ceo",
-		Op:           "ceo_write_requirement",
-		ArtifactURIs: []string{requirementURI},
-		Result:       core.TaskResultCodeOK,
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_01",
+		AgentID:   "ceo",
+		Op:        "ceo_write_requirement",
+		Commit: &core.CommitReceipt{
+			Result:                 core.TaskResultCodeOK,
+			ProducedBags:           []core.CommittedBagDef{{Name: "requirement", ArtifactVersionIDs: []string{requirementVersionID}}},
+			MaterializedOutputRefs: []string{requirementURI},
+		},
 	}); err != nil {
 		t.Fatalf("task_01 feedback error = %v", err)
 	}
@@ -2761,6 +2818,9 @@ func TestOnFeedbackCommitReceiptCreatesDoujiaGitSnapshot(t *testing.T) {
 	if len(ref.FrontierSnapshotIDs) != 1 {
 		t.Fatalf("frontier snapshot count = %d, want 1", len(ref.FrontierSnapshotIDs))
 	}
+	if !reflect.DeepEqual(ref.FrontierMemberSnapshotIDs, ref.FrontierSnapshotIDs) {
+		t.Fatalf("ref member snapshots = %v, want legacy members %v", ref.FrontierMemberSnapshotIDs, ref.FrontierSnapshotIDs)
+	}
 	if ref.FrontierSnapshotID == "" {
 		t.Fatalf("ref current frontier snapshot id should be filled")
 	}
@@ -2784,6 +2844,12 @@ func TestOnFeedbackCommitReceiptCreatesDoujiaGitSnapshot(t *testing.T) {
 	}
 	if snapshot.TaskID != "task_01" || snapshot.Result != core.TaskResultCodeOK {
 		t.Fatalf("snapshot = %+v, want task_01 ok", snapshot)
+	}
+	if snapshot.LogicalSnapshotID != "stage:task_01" ||
+		snapshot.SnapshotVersionID != snapshot.SnapshotID+":v1" ||
+		snapshot.SnapshotVersionNo != 1 ||
+		snapshot.ArrivalKind != doujiagit.RefMoveModeAdvance {
+		t.Fatalf("snapshot phase-one fields = %+v", snapshot)
 	}
 	if len(snapshot.OutputBagIDs) != 1 {
 		t.Fatalf("snapshot output bag count = %d, want 1", len(snapshot.OutputBagIDs))
@@ -2815,12 +2881,118 @@ func TestOnFeedbackCommitReceiptCreatesDoujiaGitSnapshot(t *testing.T) {
 	if dispatch.InputBags[0].BagID != snapshot.OutputBagIDs[0] {
 		t.Fatalf("dispatch input bag id = %q, want %q", dispatch.InputBags[0].BagID, snapshot.OutputBagIDs[0])
 	}
+	if dispatch.SourceSnapshotID != snapshot.SnapshotID ||
+		dispatch.SourceSnapshotVersionID != snapshot.SnapshotVersionID ||
+		dispatch.SourceFrontierSnapshotID != ref.FrontierSnapshotID ||
+		dispatch.SourceRefName != doujiagit.DefaultRefName ||
+		dispatch.DecisionKind != doujiagit.RefMoveModeAdvance {
+		t.Fatalf("dispatch provenance = %+v, snapshot = %+v ref = %+v", dispatch, snapshot, ref)
+	}
+	decision, err := doujiaGitRepo.GetSnapshotProcessingDecision(ctx, runID, doujiagit.DefaultRefName, snapshot.SnapshotID)
+	if err != nil {
+		t.Fatalf("GetSnapshotProcessingDecision() error = %v", err)
+	}
+	if decision.Status != doujiagit.SnapshotProcessingStatusAdvanced ||
+		decision.DecisionKind != doujiagit.RefMoveModeAdvance ||
+		decision.ContinuationID != "task_02" {
+		t.Fatalf("processing decision = %+v, want active-ref advance to task_02", decision)
+	}
+	if !reflect.DeepEqual(decision.ConsumedSnapshotIDs, []string{snapshot.SnapshotID}) ||
+		decision.FromFrontierSnapshotID != ref.FrontierSnapshotID ||
+		decision.ToFrontierSnapshotID == "" {
+		t.Fatalf("decision replacement fields = %+v, ref = %+v", decision, ref)
+	}
+	if !reflect.DeepEqual(decision.ProducedTaskIDs, []string{"task_02"}) {
+		t.Fatalf("decision produced task ids = %#v, want task_02", decision.ProducedTaskIDs)
+	}
+	if err := service.AdvanceActiveRefForTest(ctx, runID); err != nil {
+		t.Fatalf("AdvanceActiveRefForTest() error = %v", err)
+	}
+	if len(dispatcher.dispatched) != 1 {
+		t.Fatalf("dispatch count after active ref rerun = %d, want no duplicate dispatch", len(dispatcher.dispatched))
+	}
+}
+
+func TestOnFeedbackFailureWithCommitReceiptCreatesFactBeforeRunFails(t *testing.T) {
+	ctx := context.Background()
+	runRepo := repo.NewMemoryRunRepository()
+	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
+	service := orchestrator.NewService(
+		pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseOne()),
+		runRepo,
+		taskRepo,
+		recordingProvisioner{},
+		&recordingDispatcher{},
+		&recordingSessionRuntime{},
+		nil,
+	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
+
+	const runID core.RunID = "run_fail_fact_first"
+	if err := runRepo.Create(ctx, core.PipelineRun{
+		ID:         runID,
+		PipelineID: pipeline.PipelineIDPhaseOne,
+		Status:     core.RunStatusRunning,
+		ProjectDir: t.TempDir(),
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create(run) error = %v", err)
+	}
+	if err := service.Start(ctx, runID); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	failedVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "failed_requirement")
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_01",
+		AgentID:   "ceo",
+		Op:        "ceo_write_requirement",
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeFail,
+			ProducedBags: []core.CommittedBagDef{{Name: "failed_requirement", ArtifactVersionIDs: []string{failedVersionID}}},
+		},
+	}); err != nil {
+		t.Fatalf("task_01 feedback error = %v", err)
+	}
+
+	run, err := runRepo.Get(ctx, runID)
+	if err != nil {
+		t.Fatalf("Get(run) error = %v", err)
+	}
+	if run.Status != core.RunStatusFailed {
+		t.Fatalf("run status = %s, want failed", run.Status)
+	}
+	ref, err := doujiaGitRepo.GetRef(ctx, runID, doujiagit.DefaultRefName)
+	if err != nil {
+		t.Fatalf("GetRef() error = %v", err)
+	}
+	if len(ref.FrontierMemberSnapshotIDs) != 1 {
+		t.Fatalf("frontier members = %#v, want failed feedback snapshot", ref.FrontierMemberSnapshotIDs)
+	}
+	snapshot, err := doujiaGitRepo.GetSnapshot(ctx, ref.FrontierMemberSnapshotIDs[0])
+	if err != nil {
+		t.Fatalf("GetSnapshot() error = %v", err)
+	}
+	if snapshot.TaskID != "task_01" || snapshot.Result != core.TaskResultCodeFail {
+		t.Fatalf("latest snapshot = %+v, want task_01 fail", snapshot)
+	}
+	decision, err := doujiaGitRepo.GetSnapshotProcessingDecision(ctx, runID, doujiagit.DefaultRefName, snapshot.SnapshotID)
+	if err != nil {
+		t.Fatalf("GetSnapshotProcessingDecision() error = %v", err)
+	}
+	if decision.Status != doujiagit.SnapshotProcessingStatusTerminal {
+		t.Fatalf("decision status = %s, want terminal", decision.Status)
+	}
 }
 
 func TestOnFeedbackRewriteBlocksTaskAndCreatesRewriteChild(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -2832,6 +3004,7 @@ func TestOnFeedbackRewriteBlocksTaskAndCreatesRewriteChild(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_child_rewrite"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -2847,26 +3020,34 @@ func TestOnFeedbackRewriteBlocksTaskAndCreatesRewriteChild(t *testing.T) {
 	if err := service.Start(ctx, runID); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
+	requirementVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "requirement")
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
-		Direction:    core.TaskDirectionFeedback,
-		RunID:        runID,
-		TaskID:       "task_01",
-		AgentID:      "ceo",
-		Op:           "ceo_write_requirement",
-		ArtifactURIs: []string{"projects/run_child_rewrite/agents/ceo/artifacts/requirement/requirement_v1.md"},
-		Result:       core.TaskResultCodeOK,
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_01",
+		AgentID:   "ceo",
+		Op:        "ceo_write_requirement",
+		Commit: &core.CommitReceipt{
+			Result:                 core.TaskResultCodeOK,
+			ProducedBags:           []core.CommittedBagDef{{Name: "requirement", ArtifactVersionIDs: []string{requirementVersionID}}},
+			MaterializedOutputRefs: []string{"projects/run_child_rewrite/agents/ceo/artifacts/requirement/requirement_v1.md"},
+		},
 	}); err != nil {
 		t.Fatalf("task_01 feedback error = %v", err)
 	}
 	rewriteArtifacts := []string{"projects/run_child_rewrite/agents/pm01/artifacts/review/rewrite_instruction.md"}
+	rewriteVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "pm01", "rewrite_instruction")
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
-		Direction:    core.TaskDirectionFeedback,
-		RunID:        runID,
-		TaskID:       "task_02",
-		AgentID:      "pm01",
-		Op:           "pm_write_plan",
-		ArtifactURIs: rewriteArtifacts,
-		Result:       core.TaskResultCodeRewrite,
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_02",
+		AgentID:   "pm01",
+		Op:        "pm_write_plan",
+		Commit: &core.CommitReceipt{
+			Result:                 core.TaskResultCodeRewrite,
+			ProducedBags:           []core.CommittedBagDef{{Name: "rewrite_request", ArtifactVersionIDs: []string{rewriteVersionID}}},
+			MaterializedOutputRefs: rewriteArtifacts,
+		},
 	}); err != nil {
 		t.Fatalf("task_02 feedback error = %v", err)
 	}
@@ -2895,20 +3076,19 @@ func TestOnFeedbackRewriteBlocksTaskAndCreatesRewriteChild(t *testing.T) {
 	if sessionDispatcher.dispatched[0].Op != core.TaskOpRewrite {
 		t.Fatalf("child op = %s, want %s", sessionDispatcher.dispatched[0].Op, core.TaskOpRewrite)
 	}
-	for _, want := range []string{
-		"projects/run_child_rewrite/agents/ceo/artifacts/requirement/requirement_v1.md",
-		rewriteArtifacts[0],
-	} {
-		if !containsString(sessionDispatcher.dispatched[0].ArtifactURIs, want) {
-			t.Fatalf("rewrite child artifact uris = %v, missing %s", sessionDispatcher.dispatched[0].ArtifactURIs, want)
-		}
+	if !containsString(sessionDispatcher.dispatched[0].ArtifactURIs, rewriteArtifacts[0]) {
+		t.Fatalf("rewrite child artifact uris = %v, missing current rewrite artifact", sessionDispatcher.dispatched[0].ArtifactURIs)
+	}
+	if sessionDispatcher.dispatched[0].SourceSnapshotID == "" || sessionDispatcher.dispatched[0].SourceFrontierSnapshotID == "" {
+		t.Fatalf("rewrite child provenance = %+v, want committed fact provenance", sessionDispatcher.dispatched[0])
 	}
 }
 
-func TestOnFeedbackReplanBlocksTaskAndCreatesReplanChild(t *testing.T) {
+func TestOnFeedbackRewriteWithCommitReceiptCreatesFactBeforeRewriteChild(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -2920,6 +3100,94 @@ func TestOnFeedbackReplanBlocksTaskAndCreatesReplanChild(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
+
+	const runID core.RunID = "run_rewrite_fact_first"
+	if err := runRepo.Create(ctx, core.PipelineRun{
+		ID:         runID,
+		PipelineID: "phase_one_requirement_flow",
+		Status:     core.RunStatusRunning,
+		ProjectDir: t.TempDir(),
+		CreatedAt:  time.Now().UTC(),
+		UpdatedAt:  time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create(run) error = %v", err)
+	}
+	if err := service.Start(ctx, runID); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	requirementVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "requirement")
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_01",
+		AgentID:   "ceo",
+		Op:        "ceo_write_requirement",
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeOK,
+			ProducedBags: []core.CommittedBagDef{{Name: "requirement", ArtifactVersionIDs: []string{requirementVersionID}}},
+		},
+	}); err != nil {
+		t.Fatalf("task_01 feedback error = %v", err)
+	}
+	rewriteVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "pm01", "rewrite_request")
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_02",
+		AgentID:   "pm01",
+		Op:        "pm_write_plan",
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeRewrite,
+			ProducedBags: []core.CommittedBagDef{{Name: "rewrite_request", ArtifactVersionIDs: []string{rewriteVersionID}}},
+		},
+	}); err != nil {
+		t.Fatalf("task_02 feedback error = %v", err)
+	}
+
+	if _, err := taskRepo.Get(ctx, runID, "task_02_child_01"); err != nil {
+		t.Fatalf("Get(child) error = %v", err)
+	}
+	ref, err := doujiaGitRepo.GetRef(ctx, runID, doujiagit.DefaultRefName)
+	if err != nil {
+		t.Fatalf("GetRef() error = %v", err)
+	}
+	if len(ref.FrontierMemberSnapshotIDs) != 1 {
+		t.Fatalf("frontier members = %#v, want one rewrite snapshot", ref.FrontierMemberSnapshotIDs)
+	}
+	snapshot, err := doujiaGitRepo.GetSnapshot(ctx, ref.FrontierMemberSnapshotIDs[0])
+	if err != nil {
+		t.Fatalf("GetSnapshot() error = %v", err)
+	}
+	if snapshot.TaskID != "task_02" || snapshot.Result != core.TaskResultCodeRewrite {
+		t.Fatalf("latest snapshot = %+v, want task_02 rewrite", snapshot)
+	}
+	if len(sessionDispatcher.dispatched) != 1 {
+		t.Fatalf("session dispatch count = %d, want rewrite child dispatch only", len(sessionDispatcher.dispatched))
+	}
+	if sessionDispatcher.dispatched[0].SourceSnapshotID != snapshot.SnapshotID ||
+		sessionDispatcher.dispatched[0].SourceFrontierSnapshotID != ref.FrontierSnapshotID {
+		t.Fatalf("rewrite child provenance = %+v, want snapshot/ref %+v/%+v", sessionDispatcher.dispatched[0], snapshot, ref)
+	}
+}
+
+func TestOnFeedbackReplanBlocksTaskAndCreatesReplanChild(t *testing.T) {
+	ctx := context.Background()
+	runRepo := repo.NewMemoryRunRepository()
+	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
+	dispatcher := &recordingDispatcher{}
+	sessionDispatcher := &recordingSessionRuntime{}
+	service := orchestrator.NewService(
+		pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseOne()),
+		runRepo,
+		taskRepo,
+		recordingProvisioner{},
+		dispatcher,
+		sessionDispatcher,
+		nil,
+	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_child_replan"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -2940,10 +3208,10 @@ func TestOnFeedbackReplanBlocksTaskAndCreatesReplanChild(t *testing.T) {
 	task04Artifacts := []string{"projects/run_child_replan/agents/architect01/artifacts/design/architecture_v1.md"}
 
 	feedbacks := []core.TaskMetaData{
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_01", AgentID: "ceo", Op: "ceo_write_requirement", ArtifactURIs: task01Artifacts, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_02", AgentID: "pm01", Op: "pm_write_plan", ArtifactURIs: task02Artifacts, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_03", AgentID: "ceo", Op: "ceo_review_plan", ArtifactURIs: task02Artifacts, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_04", AgentID: "architect01", Op: "architecture_generation", ArtifactURIs: task04Artifacts, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_01", AgentID: "ceo", Op: "ceo_write_requirement", Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "requirement", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "requirement")}}}, MaterializedOutputRefs: task01Artifacts}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_02", AgentID: "pm01", Op: "pm_write_plan", Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "product_plan", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "pm01", "product_plan")}}}, MaterializedOutputRefs: task02Artifacts}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_03", AgentID: "ceo", Op: "ceo_review_plan", Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "reviewed_product_plan", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "reviewed_product_plan")}}}, MaterializedOutputRefs: task02Artifacts}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "task_04", AgentID: "architect01", Op: "architecture_generation", Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "architecture", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "architecture")}}}, MaterializedOutputRefs: task04Artifacts}},
 	}
 	for _, feedback := range feedbacks {
 		if err := service.OnFeedback(ctx, feedback); err != nil {
@@ -2951,14 +3219,18 @@ func TestOnFeedbackReplanBlocksTaskAndCreatesReplanChild(t *testing.T) {
 		}
 	}
 	reviewArtifacts := []string{"projects/run_child_replan/agents/pm01/artifacts/review/review_note_v1.md"}
+	reviewVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "pm01", "review_note")
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
-		Direction:    core.TaskDirectionFeedback,
-		RunID:        runID,
-		TaskID:       "task_05",
-		AgentID:      "pm01",
-		Op:           "pm_review_design",
-		ArtifactURIs: reviewArtifacts,
-		Result:       core.TaskResultCodeReplan,
+		Direction: core.TaskDirectionFeedback,
+		RunID:     runID,
+		TaskID:    "task_05",
+		AgentID:   "pm01",
+		Op:        "pm_review_design",
+		Commit: &core.CommitReceipt{
+			Result:                 core.TaskResultCodeReplan,
+			ProducedBags:           []core.CommittedBagDef{{Name: "replan_request", ArtifactVersionIDs: []string{reviewVersionID}}},
+			MaterializedOutputRefs: reviewArtifacts,
+		},
 	}); err != nil {
 		t.Fatalf("task_05 feedback error = %v", err)
 	}
@@ -2988,15 +3260,13 @@ func TestOnFeedbackReplanBlocksTaskAndCreatesReplanChild(t *testing.T) {
 	if last.Op != core.TaskOpReplan {
 		t.Fatalf("child op = %s, want %s", last.Op, core.TaskOpReplan)
 	}
-	wantChildArtifacts := []string{
-		task02Artifacts[0],
-		task04Artifacts[0],
-		reviewArtifacts[0],
-	}
-	for _, want := range wantChildArtifacts {
+	for _, want := range []string{task04Artifacts[0], reviewArtifacts[0]} {
 		if !containsString(last.ArtifactURIs, want) {
 			t.Fatalf("child artifact uris = %v, missing %s", last.ArtifactURIs, want)
 		}
+	}
+	if last.SourceSnapshotID == "" || last.SourceFrontierSnapshotID == "" {
+		t.Fatalf("replan child provenance = %+v, want committed fact provenance", last)
 	}
 }
 
@@ -3004,6 +3274,7 @@ func TestChildFeedbackRedispatchesParentWithMergedArtifacts(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3015,6 +3286,7 @@ func TestChildFeedbackRedispatchesParentWithMergedArtifacts(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_child_feedback_merge"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -3084,14 +3356,13 @@ func TestChildFeedbackRedispatchesParentWithMergedArtifacts(t *testing.T) {
 	if last.TaskID != "task_05" || last.Op != "pm_review_design" {
 		t.Fatalf("last dispatch = %+v, want redispatched task_05 review", last)
 	}
-	wantRedispatchArtifacts := []string{
-		task02Artifacts[0],
-		replannedDesign[0],
-	}
-	for _, want := range wantRedispatchArtifacts {
+	for _, want := range []string{reviewArtifacts[0], replannedDesign[0]} {
 		if !containsString(last.ArtifactURIs, want) {
 			t.Fatalf("redispatch artifact uris = %v, missing %s", last.ArtifactURIs, want)
 		}
+	}
+	if last.SourceSnapshotID == "" || last.SourceFrontierSnapshotID == "" {
+		t.Fatalf("redispatch provenance = %+v, want committed fact provenance", last)
 	}
 }
 
@@ -3099,6 +3370,7 @@ func TestPhaseTwoSplitModuleControlCreatesDynamicCoderTesterTasks(t *testing.T) 
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3110,6 +3382,7 @@ func TestPhaseTwoSplitModuleControlCreatesDynamicCoderTesterTasks(t *testing.T) 
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_control"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -3217,6 +3490,8 @@ func TestPhaseTwoSplitModuleControlCreatesDynamicTasksWithSQLite(t *testing.T) {
 	defer db.Close()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
+	doujiaGitRepo, closeDoujiaGit := openTestDoujiaGitSQLiteRepository(t, ctx)
+	defer closeDoujiaGit()
 	service := orchestrator.NewService(
 		pipeline.NewMemoryRegistry(pipeline.BuiltinPhaseTwo()),
 		repos.Runs,
@@ -3228,6 +3503,7 @@ func TestPhaseTwoSplitModuleControlCreatesDynamicTasksWithSQLite(t *testing.T) {
 	)
 	service.SetArtifactRepository(repos.Artifacts)
 	service.SetEventRepository(repos.Events)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_control_sqlite"
 	if err := repos.Runs.Create(ctx, core.PipelineRun{
@@ -3293,6 +3569,7 @@ func TestPhaseTwoModulePairCreatesTestCodeAndMergeDependencies(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3304,6 +3581,7 @@ func TestPhaseTwoModulePairCreatesTestCodeAndMergeDependencies(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_pair_deps"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -3553,6 +3831,7 @@ func TestPhaseTwoInvalidControlCreatesResplitTask(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3564,6 +3843,7 @@ func TestPhaseTwoInvalidControlCreatesResplitTask(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_invalid_control"
 	if err := runRepo.Create(ctx, core.PipelineRun{
@@ -3633,6 +3913,7 @@ func TestDynamicCoderBugCreatesDebugTaskAndDebugSuccessUnblocksDependents(t *tes
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3644,6 +3925,7 @@ func TestDynamicCoderBugCreatesDebugTaskAndDebugSuccessUnblocksDependents(t *tes
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_coder_debug_retry"
 	now := time.Now().UTC()
@@ -3801,6 +4083,7 @@ func TestDynamicTesterTestCodeBugCreatesCoderDebugTaskAndRetests(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3812,6 +4095,7 @@ func TestDynamicTesterTestCodeBugCreatesCoderDebugTaskAndRetests(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_tester_debug_retry"
 	now := time.Now().UTC()
@@ -3922,6 +4206,7 @@ func TestDynamicTestDataTransientTimeoutRetriesOnceThenFails(t *testing.T) {
 	ctx := context.Background()
 	runRepo := repo.NewMemoryRunRepository()
 	taskRepo := repo.NewMemoryTaskRepository()
+	doujiaGitRepo := doujiagit.NewMemoryRepository()
 	dispatcher := &recordingDispatcher{}
 	sessionDispatcher := &recordingSessionRuntime{}
 	service := orchestrator.NewService(
@@ -3933,6 +4218,7 @@ func TestDynamicTestDataTransientTimeoutRetriesOnceThenFails(t *testing.T) {
 		sessionDispatcher,
 		nil,
 	)
+	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_phase_two_test_data_timeout_retry"
 	now := time.Now().UTC()
@@ -3984,6 +4270,7 @@ func TestDynamicTestDataTransientTimeoutRetriesOnceThenFails(t *testing.T) {
 	}
 
 	timeoutDiagnostics := `{"result":"kfail","outputs":null,"errors":[{"code":"agent_run_failed","message":"Post \"https://ark.cn-beijing.volces.com/api/v3/chat/completions\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"}]}`
+	timeoutVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "tester02", "timeout_diagnostics")
 	timeoutFeedback := core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
@@ -3994,6 +4281,7 @@ func TestDynamicTestDataTransientTimeoutRetriesOnceThenFails(t *testing.T) {
 		Result:    core.TaskResultCodeFail,
 		Commit: &core.CommitReceipt{
 			Result:          core.TaskResultCodeFail,
+			ProducedBags:    []core.CommittedBagDef{{Name: "timeout_diagnostics", ArtifactVersionIDs: []string{timeoutVersionID}}},
 			DiagnosticsJSON: timeoutDiagnostics,
 		},
 	}
@@ -4025,6 +4313,24 @@ func TestDynamicTestDataTransientTimeoutRetriesOnceThenFails(t *testing.T) {
 	retryDispatch := dispatcher.dispatched[0]
 	if retryDispatch.TaskID != testDataID || retryDispatch.Op != core.TaskOpTestData {
 		t.Fatalf("retry dispatch = %+v, want tester02 test_data redispatch", retryDispatch)
+	}
+	ref, err := doujiaGitRepo.GetRef(ctx, runID, doujiagit.DefaultRefName)
+	if err != nil {
+		t.Fatalf("GetRef(after retry) error = %v", err)
+	}
+	if len(ref.FrontierMemberSnapshotIDs) != 1 {
+		t.Fatalf("frontier members after retry = %#v, want transient failure snapshot", ref.FrontierMemberSnapshotIDs)
+	}
+	snapshot, err := doujiaGitRepo.GetSnapshot(ctx, ref.FrontierMemberSnapshotIDs[0])
+	if err != nil {
+		t.Fatalf("GetSnapshot(after retry) error = %v", err)
+	}
+	if snapshot.TaskID != testDataID || snapshot.Result != core.TaskResultCodeFail {
+		t.Fatalf("transient retry snapshot = %+v, want failed test data feedback", snapshot)
+	}
+	if retryDispatch.SourceSnapshotID != snapshot.SnapshotID ||
+		retryDispatch.SourceFrontierSnapshotID != ref.FrontierSnapshotID {
+		t.Fatalf("retry dispatch provenance = %+v, want snapshot/ref %+v/%+v", retryDispatch, snapshot, ref)
 	}
 	for _, want := range testDataInputs {
 		if !containsString(retryDispatch.ArtifactURIs, want) {
@@ -4592,6 +4898,20 @@ func createDoujiaGitVersion(t *testing.T, ctx context.Context, repository doujia
 		t.Fatalf("UpsertArtifactVersion(%s/%s) error = %v", namespace, logicalKey, err)
 	}
 	return version.ArtifactVersionID
+}
+
+func openTestDoujiaGitSQLiteRepository(t *testing.T, ctx context.Context) (doujiagit.Repository, func()) {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "doujiagit.db"))
+	if err != nil {
+		t.Fatalf("sql.Open(doujiagit) error = %v", err)
+	}
+	repository := doujiagit.NewSQLiteRepository(db)
+	if err := repository.Migrate(ctx); err != nil {
+		_ = db.Close()
+		t.Fatalf("doujiagit Migrate() error = %v", err)
+	}
+	return repository, func() { _ = db.Close() }
 }
 
 func sameTestStringSet(left []string, right []string) bool {
