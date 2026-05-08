@@ -344,20 +344,18 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 		}
 		return s.createResplitTask(ctx, run, task, feedback, fmt.Errorf("agent reported invalid control"))
 	default:
-		task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusFailed)
+		status := core.TaskStatusFailed
+		if feedback.Result == core.TaskResultCodeFail {
+			status = core.TaskStatusBlocked
+		}
+		task, err = s.updateTaskFromFeedback(ctx, task, feedback, status)
 		if err != nil {
 			return err
 		}
-		run.Status = core.RunStatusFailed
-		run.UpdatedAt = time.Now().UTC()
-		if s.logger != nil {
-			_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("run failed on task=%s", task.ID))
+		if feedback.Result == core.TaskResultCodeFail {
+			return s.blockRun(ctx, run, task.ID, task.AgentID, "manual_ref_recovery_required", feedback.Result)
 		}
-		s.recordEvent(ctx, run.ID, task.ID, task.AgentID, "run_failed", "run failed", map[string]any{
-			"task_id": task.ID,
-			"result":  feedback.Result,
-		})
-		return s.runs.Update(ctx, run)
+		return s.failRun(ctx, run, task.ID)
 	}
 
 	spec, err := s.pipelines.Get(ctx, run.PipelineID)
@@ -500,8 +498,15 @@ func (s *Service) handlePipelineInstanceTaskFeedback(ctx context.Context, run co
 		}
 		return s.advancePipelineInstanceAfterTransition(ctx, run, instance, def, transition.ToState, feedback.Result)
 	default:
-		if _, err := s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusFailed); err != nil {
+		status := core.TaskStatusFailed
+		if feedback.Result == core.TaskResultCodeFail {
+			status = core.TaskStatusBlocked
+		}
+		if _, err := s.updateTaskFromFeedback(ctx, task, feedback, status); err != nil {
 			return err
+		}
+		if feedback.Result == core.TaskResultCodeFail {
+			return s.blockRun(ctx, run, task.ID, task.AgentID, "manual_ref_recovery_required", feedback.Result)
 		}
 		if s.instances != nil {
 			if instance, err := s.instances.Get(ctx, run.ID, task.PipelineInstanceID); err == nil {
@@ -1469,13 +1474,7 @@ func (s *Service) handleDynamicTaskFeedback(ctx context.Context, run core.Pipeli
 		if err != nil {
 			return err
 		}
-		run.Status = core.RunStatusFailed
-		run.UpdatedAt = time.Now().UTC()
-		s.recordEvent(ctx, run.ID, task.ID, task.AgentID, "run_failed", "run failed", map[string]any{
-			"task_id": task.ID,
-			"result":  feedback.Result,
-		})
-		return s.runs.Update(ctx, run)
+		return s.failRun(ctx, run, task.ID)
 	}
 	var err error
 	task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusDone)
@@ -1589,16 +1588,7 @@ func (s *Service) handleChildFeedback(ctx context.Context, run core.PipelineRun,
 		if err != nil {
 			return err
 		}
-		run.Status = core.RunStatusFailed
-		run.UpdatedAt = time.Now().UTC()
-		if s.logger != nil {
-			_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("run failed on child task=%s", task.ID))
-		}
-		s.recordEvent(ctx, run.ID, task.ID, task.AgentID, "run_failed", "run failed on child task", map[string]any{
-			"task_id": task.ID,
-			"result":  feedback.Result,
-		})
-		return s.runs.Update(ctx, run)
+		return s.failRun(ctx, run, task.ID)
 	}
 	var err error
 	task, err = s.updateTaskFromFeedback(ctx, task, feedback, core.TaskStatusDone)
@@ -3709,9 +3699,7 @@ func bagIDsForBindingObject(parent core.PipelineInstance, bagRef string, binding
 	bag := pipeline.BagSpec{Name: bagRef}
 	if len(specs) > 0 {
 		bag = specs[0]
-		if strings.TrimSpace(bag.Name) == "" {
-			bag.Name = bagRef
-		}
+		bag.Name = bagRef
 	}
 	if len(bag.IndexedBy) == 0 {
 		if indexedBy := stringSliceFromAnyMap(binding, "indexed_by"); len(indexedBy) > 0 {
@@ -4204,6 +4192,11 @@ func aggregateInputBagIDsForExposed(state pipeline.StateSpec, instance core.Pipe
 	if len(exposed.FromStates) == 0 {
 		return aggregateInputBagIDs(state, instance)
 	}
+	if strings.TrimSpace(exposed.Name) != "" {
+		if ids := bagIDsForName(instance, exposed.Name); len(ids) > 0 {
+			return uniqueStrings(ids)
+		}
+	}
 	out := make([]string, 0)
 	for _, fromState := range exposed.FromStates {
 		out = append(out, bagIDsForName(instance, fromState)...)
@@ -4225,6 +4218,13 @@ func bagIDsForState(instance core.PipelineInstance, stateID string) []string {
 		out = append(out, bagIDsForName(instance, "global_test_data")...)
 	case "modules_tested":
 		out = append(out, bagIDsForName(instance, "tested_module")...)
+	case "front_module_slot_done":
+		out = append(out, bagIDsForName(instance, "front_slot_result")...)
+		out = append(out, bagIDsForName(instance, "tested_module")...)
+		out = append(out, bagIDsForName(instance, "code_bag")...)
+	case "backend_modules_done":
+		out = append(out, bagIDsForName(instance, "tested_module")...)
+		out = append(out, bagIDsForName(instance, "code_bag")...)
 	case "container_ready":
 		out = append(out, bagIDsForName(instance, "container_context")...)
 	}
@@ -5231,6 +5231,20 @@ func (s *Service) failRun(ctx context.Context, run core.PipelineRun, taskID core
 	}
 	s.recordEvent(ctx, run.ID, taskID, "", "run_failed", "run failed", map[string]any{
 		"task_id": taskID,
+	})
+	return s.runs.Update(ctx, run)
+}
+
+func (s *Service) blockRun(ctx context.Context, run core.PipelineRun, taskID core.TaskID, agentID core.AgentID, reason string, result core.TaskResultCode) error {
+	run.Status = core.RunStatusBlocked
+	run.UpdatedAt = time.Now().UTC()
+	if s.logger != nil {
+		_ = s.logger.Log(run.ID, "Orchestrator", fmt.Sprintf("run blocked on task=%s reason=%s", taskID, reason))
+	}
+	s.recordEvent(ctx, run.ID, taskID, agentID, "run_blocked", "run blocked for manual recovery", map[string]any{
+		"task_id": taskID,
+		"result":  result,
+		"reason":  reason,
 	})
 	return s.runs.Update(ctx, run)
 }

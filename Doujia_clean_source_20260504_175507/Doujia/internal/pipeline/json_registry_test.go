@@ -8,7 +8,7 @@ import (
 
 func TestLoadJSONRegistryLooksUpDefinitions(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
 	registry, err := LoadJSONRegistry(path)
 	if err != nil {
 		t.Fatalf("LoadJSONRegistry() error = %v", err)
@@ -72,7 +72,7 @@ func TestNewLegacyRegistryFromSpecCompilesLinearTaskPipeline(t *testing.T) {
 
 func TestLegacyAdapterCompilesFullDeliveryTaskPrefix(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
 	spec, err := LoadRegistrySpec(path)
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
@@ -87,12 +87,9 @@ func TestLegacyAdapterCompilesFullDeliveryTaskPrefix(t *testing.T) {
 	}
 	wantStages := []string{
 		"ceo_write_requirement",
-		"pm_write_plan",
-		"ceo_review_product_plan",
-		"architect_write_plan",
-		"pm_review_architecture",
-		"architect_create_container",
-		"split_module",
+		"pm_write_product_doc",
+		"architect_write_architecture",
+		"architect_launch_parallel_work",
 	}
 	if got, want := len(legacy.Stages), len(wantStages); got != want {
 		t.Fatalf("stage count = %d, want %d", got, want)
@@ -105,8 +102,8 @@ func TestLegacyAdapterCompilesFullDeliveryTaskPrefix(t *testing.T) {
 	if !legacy.Stages[0].External {
 		t.Fatalf("first stage should be external")
 	}
-	if got := legacy.Stages[len(legacy.Stages)-1].Op; got != "split_module" {
-		t.Fatalf("last op = %s, want split_module", got)
+	if got := legacy.Stages[len(legacy.Stages)-1].Op; got != "launch_parallel_work" {
+		t.Fatalf("last op = %s, want launch_parallel_work", got)
 	}
 }
 

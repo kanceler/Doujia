@@ -19,6 +19,7 @@ type RunStatus string
 const (
 	RunStatusCreated            RunStatus = "created"
 	RunStatusRunning            RunStatus = "running"
+	RunStatusBlocked            RunStatus = "blocked"
 	RunStatusAwaitingAcceptance RunStatus = "awaiting_acceptance"
 	RunStatusCompleted          RunStatus = "completed"
 	RunStatusFailed             RunStatus = "failed"

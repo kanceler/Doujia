@@ -1,4 +1,4 @@
-package orchestrator_test
+﻿package orchestrator_test
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 
 func TestLegacyPrefixSplitModuleDispatchUsesDeclaredHistoricalInputBags(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -62,17 +62,15 @@ func TestLegacyPrefixSplitModuleDispatchUsesDeclaredHistoricalInputBags(t *testi
 		t.Fatalf("Start() error = %v", err)
 	}
 	requirementVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "ceo", "requirement")
-	productPlanVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "pm01", "pm_plan")
+	productPlanVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "pm01", "product_doc")
 	architectureVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "architecture_plan")
-	containerContextVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "container_context")
+	parallelPlanVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "parallel_work_plan")
 
 	feedbacks := []core.TaskMetaData{
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_write_requirement", AgentID: "ceo", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "requirement", ArtifactVersionIDs: []string{requirementVersionID}}}}},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_plan", AgentID: "pm01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "product_plan", ArtifactVersionIDs: []string{productPlanVersionID}}}}},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_review_product_plan", AgentID: "ceo", Op: core.TaskOpReviewPlan, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_plan", AgentID: "architect01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "architecture", ArtifactVersionIDs: []string{architectureVersionID}}}}},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_review_architecture", AgentID: "pm01", Op: core.TaskOpReviewPlan, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_create_container", AgentID: "architect01", Op: core.TaskOpCreateContainer, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "container_context", ArtifactVersionIDs: []string{containerContextVersionID}}}}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_product_doc", AgentID: "pm01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "product_doc", ArtifactVersionIDs: []string{productPlanVersionID}}}}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_architecture", AgentID: "architect01", Op: core.TaskOpWritePlan, Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "architecture", ArtifactVersionIDs: []string{architectureVersionID}}}}},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_launch_parallel_work", AgentID: "architect01", Op: "launch_parallel_work", Result: core.TaskResultCodeOK, Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{Name: "parallel_work_plan", ArtifactVersionIDs: []string{parallelPlanVersionID}}}}},
 	}
 	for _, feedback := range feedbacks {
 		if err := service.OnFeedback(ctx, feedback); err != nil {
@@ -80,25 +78,18 @@ func TestLegacyPrefixSplitModuleDispatchUsesDeclaredHistoricalInputBags(t *testi
 		}
 	}
 
-	splitTask, err := taskRepo.Get(ctx, runID, "split_module")
+	if _, err := taskRepo.Get(ctx, runID, "create_container"); err == nil {
+		t.Fatalf("create_container should not exist in legacy prefix task list")
+	}
+	if _, err := taskRepo.Get(ctx, runID, "split_modules"); err == nil {
+		t.Fatalf("split_modules should not exist in legacy prefix task list")
+	}
+	run, err := runRepo.Get(ctx, runID)
 	if err != nil {
-		t.Fatalf("Get(split_module) error = %v", err)
+		t.Fatalf("Get(run) error = %v", err)
 	}
-	if splitTask.Status != core.TaskStatusDispatched {
-		t.Fatalf("split_module status = %s, want dispatched", splitTask.Status)
-	}
-	inputsByName := make(map[string]string, len(splitTask.InputBags))
-	for _, bag := range splitTask.InputBags {
-		inputsByName[bag.Name] = bag.BagID
-	}
-	if inputsByName["architecture"] == "" {
-		t.Fatalf("split_module named input bags = %#v, missing architecture", splitTask.InputBags)
-	}
-	if inputsByName["container_context"] == "" {
-		t.Fatalf("split_module named input bags = %#v, missing container_context", splitTask.InputBags)
-	}
-	if len(splitTask.InputBagIDs) != 2 {
-		t.Fatalf("split_module input bag ids = %#v, want architecture and container_context", splitTask.InputBagIDs)
+	if run.Status != core.RunStatusAwaitingAcceptance {
+		t.Fatalf("run status = %s, want awaiting_acceptance after legacy prefix completion", run.Status)
 	}
 }
 
@@ -270,15 +261,15 @@ func TestPhaseTwoFlowWithExternalCEOFeedbackProtocolMockExtended(t *testing.T) {
 	feedback, err := session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionDispatch,
 		RunID:     runID,
-		TaskID:    "ceo_write_requirement",
+		TaskID:    "task_01",
 		AgentID:   "ceo",
 		Op:        core.TaskOpWritePlan,
 	})
 	if err != nil {
-		t.Fatalf("ceo_write_requirement execute error = %v", err)
+		t.Fatalf("task_01 execute error = %v", err)
 	}
 	if err := bootstrap.Internals.Orchestrator.OnFeedback(ctx, feedback); err != nil {
-		t.Fatalf("ceo_write_requirement feedback error = %v", err)
+		t.Fatalf("task_01 feedback error = %v", err)
 	}
 
 	run := waitForRunStatusAny(t, ctx, bootstrap, runID, []core.RunStatus{
@@ -338,15 +329,15 @@ func TestPhaseTwoFlowWithExternalCEOFeedbackProtocolMockExtendedSQLite(t *testin
 	feedback, err := session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionDispatch,
 		RunID:     runID,
-		TaskID:    "ceo_write_requirement",
+		TaskID:    "task_01",
 		AgentID:   "ceo",
 		Op:        core.TaskOpWritePlan,
 	})
 	if err != nil {
-		t.Fatalf("ceo_write_requirement execute error = %v", err)
+		t.Fatalf("task_01 execute error = %v", err)
 	}
 	if err := bootstrap.Internals.Orchestrator.OnFeedback(ctx, feedback); err != nil {
-		t.Fatalf("ceo_write_requirement feedback error = %v", err)
+		t.Fatalf("task_01 feedback error = %v", err)
 	}
 
 	run := waitForRunStatusAny(t, ctx, bootstrap, runID, []core.RunStatus{
@@ -408,15 +399,15 @@ func TestPhaseTwoProtocolMockRecoverExhaustsAttemptsFast(t *testing.T) {
 	feedback, err := session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionDispatch,
 		RunID:     runID,
-		TaskID:    "ceo_write_requirement",
+		TaskID:    "task_01",
 		AgentID:   "ceo",
 		Op:        core.TaskOpWritePlan,
 	})
 	if err != nil {
-		t.Fatalf("ceo_write_requirement execute error = %v", err)
+		t.Fatalf("task_01 execute error = %v", err)
 	}
 	if err := bootstrap.Internals.Orchestrator.OnFeedback(ctx, feedback); err != nil {
-		t.Fatalf("ceo_write_requirement feedback error = %v", err)
+		t.Fatalf("task_01 feedback error = %v", err)
 	}
 
 	run := waitForRunStatusAny(t, ctx, bootstrap, runID, []core.RunStatus{
@@ -499,15 +490,15 @@ func TestPhaseTwoProtocolMockRecoverExhaustsAttemptsFastSQLite(t *testing.T) {
 	feedback, err := session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionDispatch,
 		RunID:     runID,
-		TaskID:    "ceo_write_requirement",
+		TaskID:    "task_01",
 		AgentID:   "ceo",
 		Op:        core.TaskOpWritePlan,
 	})
 	if err != nil {
-		t.Fatalf("ceo_write_requirement execute error = %v", err)
+		t.Fatalf("task_01 execute error = %v", err)
 	}
 	if err := bootstrap.Internals.Orchestrator.OnFeedback(ctx, feedback); err != nil {
-		t.Fatalf("ceo_write_requirement feedback error = %v", err)
+		t.Fatalf("task_01 feedback error = %v", err)
 	}
 
 	run := waitForRunStatusAny(t, ctx, bootstrap, runID, []core.RunStatus{
@@ -561,15 +552,15 @@ func TestPhaseTwoProtocolMockRecoverSucceedsAfterSingleBug(t *testing.T) {
 	feedback, err := session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionDispatch,
 		RunID:     runID,
-		TaskID:    "ceo_write_requirement",
+		TaskID:    "task_01",
 		AgentID:   "ceo",
 		Op:        core.TaskOpWritePlan,
 	})
 	if err != nil {
-		t.Fatalf("ceo_write_requirement execute error = %v", err)
+		t.Fatalf("task_01 execute error = %v", err)
 	}
 	if err := bootstrap.Internals.Orchestrator.OnFeedback(ctx, feedback); err != nil {
-		t.Fatalf("ceo_write_requirement feedback error = %v", err)
+		t.Fatalf("task_01 feedback error = %v", err)
 	}
 
 	run := waitForRunStatusAny(t, ctx, bootstrap, runID, []core.RunStatus{
@@ -612,7 +603,7 @@ func TestPhaseTwoProtocolMockRecoverSucceedsAfterSingleBug(t *testing.T) {
 
 func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -659,10 +650,9 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 
 	feedbacks := []core.TaskMetaData{
 		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_write_requirement", AgentID: "ceo", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/ceo/artifacts/requirement/requirement_v1.md"}, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_plan", AgentID: "pm01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/pm01/artifacts/prd/plan_v1.md"}, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "ceo_review_product_plan", AgentID: "ceo", Op: core.TaskOpReviewPlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/pm01/artifacts/prd/plan_v1.md"}, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_plan", AgentID: "architect01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/architect01/artifacts/architecture/global_architecture_v1.md"}, Result: core.TaskResultCodeOK},
-		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_review_architecture", AgentID: "pm01", Op: core.TaskOpReviewPlan, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "pm_write_product_doc", AgentID: "pm01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/pm01/artifacts/prd/plan_v1.md"}, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_write_architecture", AgentID: "architect01", Op: core.TaskOpWritePlan, ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/architect01/artifacts/architecture/global_architecture_v1.md"}, Result: core.TaskResultCodeOK},
+		{Direction: core.TaskDirectionFeedback, RunID: runID, TaskID: "architect_launch_parallel_work", AgentID: "architect01", Op: "launch_parallel_work", ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/architect01/artifacts/plan/parallel_work_plan_v1.md"}, Result: core.TaskResultCodeOK},
 	}
 	for _, feedback := range feedbacks {
 		if err := service.OnFeedback(ctx, feedback); err != nil {
@@ -670,43 +660,27 @@ func TestFullDeliveryJSONRegistryDrivesLegacyMainTaskPrefix(t *testing.T) {
 		}
 	}
 
-	containerTask, err := taskRepo.Get(ctx, runID, "architect_create_container")
+	if _, err := taskRepo.Get(ctx, runID, "create_container"); err == nil {
+		t.Fatalf("create_container should not be part of legacy main task prefix")
+	}
+	if _, err := taskRepo.Get(ctx, runID, "split_modules"); err == nil {
+		t.Fatalf("split_modules should not be part of legacy main task prefix")
+	}
+	run, err := runRepo.Get(ctx, runID)
 	if err != nil {
-		t.Fatalf("Get(architect_create_container) error = %v", err)
+		t.Fatalf("Get(run) error = %v", err)
 	}
-	if containerTask.Status != core.TaskStatusDispatched {
-		t.Fatalf("architect_create_container status = %s, want dispatched", containerTask.Status)
+	if run.Status != core.RunStatusAwaitingAcceptance {
+		t.Fatalf("run status = %s, want awaiting_acceptance after legacy prefix completion", run.Status)
 	}
-	if countDispatchOp(dispatcher.dispatched, core.TaskOpCreateContainer) != 1 {
-		t.Fatalf("dispatches = %+v, want one create_container dispatch", dispatcher.dispatched)
-	}
-	if err := service.OnFeedback(ctx, core.TaskMetaData{
-		Direction:    core.TaskDirectionFeedback,
-		RunID:        runID,
-		TaskID:       "architect_create_container",
-		AgentID:      "architect01",
-		Op:           core.TaskOpCreateContainer,
-		ArtifactURIs: []string{"projects/run_full_delivery_json_prefix/agents/architect01/artifacts/container/container_context.json"},
-		Result:       core.TaskResultCodeOK,
-	}); err != nil {
-		t.Fatalf("create_container feedback error = %v", err)
-	}
-
-	splitTask, err := taskRepo.Get(ctx, runID, "split_module")
-	if err != nil {
-		t.Fatalf("Get(split_module) error = %v", err)
-	}
-	if splitTask.Status != core.TaskStatusDispatched {
-		t.Fatalf("split_module status = %s, want dispatched", splitTask.Status)
-	}
-	if countDispatchOp(dispatcher.dispatched, core.TaskOpSplitModule) != 1 {
-		t.Fatalf("dispatches = %+v, want one split_module dispatch", dispatcher.dispatched)
+	if countDispatchOp(dispatcher.dispatched, core.TaskOpCreateContainer) != 0 {
+		t.Fatalf("dispatches = %+v, legacy prefix should not dispatch create_container", dispatcher.dispatched)
 	}
 }
 
 func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -737,45 +711,48 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_start_pipeline_controls"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	splitTask := core.Task{
-		ID:        "split_module",
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootLaunchBags(t, ctx, doujiaGitRepo, runID, now)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, map[string]core.AgentID{
+		"front":  "front01",
+		"tester": "front_tester01",
+	})
+
+	sourceTask := core.Task{
+		ID:        "architect_launch_module_development",
 		RunID:     runID,
-		StageID:   "split_module",
+		StageID:   "architect_launch_module_development",
 		AgentRole: core.AgentRoleArchitect,
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Status:    core.TaskStatusDispatched,
+		InputBagIDs: []string{
+			"bag_container_context",
+			"bag_module_manifest",
+			"bag_module01",
+			"bag_module02",
+			"bag_front_module_input",
+			"bag_global_test_input",
+		},
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := taskRepo.Create(ctx, splitTask); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	if err := taskRepo.Create(ctx, sourceTask); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 
 	feedback := core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Control: []core.Control{
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module01",
 				Params:       map[string]string{"module_key": "module01"},
 				AgentBindings: map[string]core.AgentID{
@@ -786,8 +763,8 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 			},
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module02",
 				Params:       map[string]string{"module_key": "module02"},
 				AgentBindings: map[string]core.AgentID{
@@ -798,10 +775,17 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 			},
 			{
 				Type:         core.ControlTypeStartPipeline,
+				TransitionID: "run_front_module_slot",
+				PipelineID:   "pipeline_front_module_slot",
+				InstanceKey:  "front_slot",
+				InputBags:    map[string]string{"front_module_input": "bag_unused_front_control"},
+			},
+			{
+				Type:         core.ControlTypeStartPipeline,
 				TransitionID: "write_global_test_data",
 				PipelineID:   "pipeline_global_test_data",
 				InstanceKey:  "global",
-				InputBags:    map[string]string{"global_test_input": "bag_global"},
+				InputBags:    map[string]string{"global_test_input": "bag_unused_global_control"},
 			},
 		},
 	}
@@ -813,8 +797,8 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListByRun(instances) error = %v", err)
 	}
-	if len(instances) != 8 {
-		t.Fatalf("instances = %#v, want root + 3 controlled children + 4 nested single-call children", instances)
+	if len(instances) < 9 {
+		t.Fatalf("instances = %#v, want root plus controlled and nested child pipelines", instances)
 	}
 	root, err := instanceRepo.Get(ctx, runID, "root")
 	if err != nil {
@@ -823,12 +807,12 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 	if root.AgentBindings["architect"] != "architect01" || root.AgentBindings["pm"] != "pm01" {
 		t.Fatalf("root agent bindings = %#v, want inherited defaults", root.AgentBindings)
 	}
-	module01ID := core.PipelineInstanceID("root_test_all_modules_module01")
+	module01ID := core.PipelineInstanceID("root_run_backend_modules_module01")
 	module01, err := instanceRepo.Get(ctx, runID, module01ID)
 	if err != nil {
 		t.Fatalf("Get(module01) error = %v", err)
 	}
-	if module01.PipelineID != "pipeline_module" || module01.ParentTransitionID != "test_all_modules" || module01.InstanceKey != "module01" {
+	if module01.PipelineID != "pipeline_backend_module" || module01.ParentTransitionID != "run_backend_modules" || module01.InstanceKey != "module01" {
 		t.Fatalf("module01 instance = %#v", module01)
 	}
 	if module01.Params["module_key"] != "module01" || module01.InputBagIDs["module_input"] != "bag_module01" {
@@ -842,7 +826,7 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(global) error = %v", err)
 	}
-	if global.PipelineID != "pipeline_global_test_data" || global.InputBagIDs["global_test_input"] != "bag_global" {
+	if global.PipelineID != "pipeline_global_test_data" || global.InputBagIDs["global_test_input"] != "bag_global_test_input" {
 		t.Fatalf("global instance = %#v", global)
 	}
 	if global.AgentBindings["architect"] != "architect01" {
@@ -852,7 +836,19 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 		t.Fatalf("global status = %s, want running", global.Status)
 	}
 
-	codeInstanceID := core.PipelineInstanceID("root_test_all_modules_module01_write_code_single")
+	frontID := core.PipelineInstanceID("root_run_front_module_slot_front_slot")
+	front, err := instanceRepo.Get(ctx, runID, frontID)
+	if err != nil {
+		t.Fatalf("Get(front slot) error = %v", err)
+	}
+	if front.PipelineID != "pipeline_front_module_slot" || front.InputBagIDs["front_module_input"] != "bag_front_module_input" {
+		t.Fatalf("front slot instance = %#v", front)
+	}
+	if front.AgentBindings["front"] != "front01" || front.AgentBindings["tester"] != "front_tester01" {
+		t.Fatalf("front slot agent bindings = %#v", front.AgentBindings)
+	}
+
+	codeInstanceID := core.PipelineInstanceID("root_run_backend_modules_module01_write_code_single")
 	codeInstance, err := instanceRepo.Get(ctx, runID, codeInstanceID)
 	if err != nil {
 		t.Fatalf("Get(module01 write_code child) error = %v", err)
@@ -866,7 +862,9 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 		"tester01|test_data|bag_module01":  false,
 		"coder02|write_code|bag_module02":  false,
 		"tester02|test_data|bag_module02":  false,
-		"architect01|test_data|bag_global": false,
+		"architect01|test_data|bag_global_test_input": false,
+		"front01|write_code|bag_front_module_input": false,
+		"front_tester01|test_data|bag_front_module_input": false,
 	}
 	for _, dispatch := range dispatcher.dispatched {
 		if len(dispatch.InputBagIDs) != 1 {
@@ -883,7 +881,7 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 		}
 	}
 
-	codeTaskID := core.TaskID("root_test_all_modules_module01_write_code_single_write_code")
+	codeTaskID := core.TaskID("root_run_backend_modules_module01_write_code_single_write_code")
 	codeTask, err := taskRepo.Get(ctx, runID, codeTaskID)
 	if err != nil {
 		t.Fatalf("Get(code task) error = %v", err)
@@ -895,7 +893,7 @@ func TestStartPipelineControlsCreatePipelineInstances(t *testing.T) {
 
 func TestStartPipelineControlUsesJSONBindingsForInstanceInitialization(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -924,44 +922,24 @@ func TestStartPipelineControlUsesJSONBindingsForInstanceInitialization(t *testin
 	service.SetPipelineInstanceRepository(instanceRepo)
 
 	const runID core.RunID = "run_start_pipeline_json_bindings"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	if err := taskRepo.Create(ctx, core.Task{
-		ID:        "split_module",
-		RunID:     runID,
-		StageID:   "split_module",
-		AgentRole: core.AgentRoleArchitect,
-		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
-		Status:    core.TaskStatusDispatched,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, nil)
+	if err := taskRepo.Create(ctx, createLaunchModuleDevelopmentTask(runID, now)); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Control: []core.Control{
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module01",
 				Params: map[string]string{
 					"module_key": "module01",
@@ -979,10 +957,10 @@ func TestStartPipelineControlUsesJSONBindingsForInstanceInitialization(t *testin
 			},
 		},
 	}); err != nil {
-		t.Fatalf("split_module feedback error = %v", err)
+		t.Fatalf("launch_module_development feedback error = %v", err)
 	}
 
-	module, err := instanceRepo.Get(ctx, runID, "root_test_all_modules_module01")
+	module, err := instanceRepo.Get(ctx, runID, "root_run_backend_modules_module01")
 	if err != nil {
 		t.Fatalf("Get(module instance) error = %v", err)
 	}
@@ -999,7 +977,7 @@ func TestStartPipelineControlUsesJSONBindingsForInstanceInitialization(t *testin
 
 func TestStartPipelineControlInputBagsCanReferenceProducedBagNames(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -1029,39 +1007,20 @@ func TestStartPipelineControlInputBagsCanReferenceProducedBagNames(t *testing.T)
 	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_start_pipeline_output_key_input"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	if err := taskRepo.Create(ctx, core.Task{
-		ID:        "split_module",
-		RunID:     runID,
-		StageID:   "split_module",
-		AgentRole: core.AgentRoleArchitect,
-		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
-		Status:    core.TaskStatusDispatched,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootLaunchBags(t, ctx, doujiaGitRepo, runID, now)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, nil)
+	if err := taskRepo.Create(ctx, createLaunchModuleDevelopmentTask(runID, now)); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 	moduleVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "module01_input")
 	globalVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "global_test_input")
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Commit: &core.CommitReceipt{
 			Result: core.TaskResultCodeOK,
@@ -1072,8 +1031,8 @@ func TestStartPipelineControlInputBagsCanReferenceProducedBagNames(t *testing.T)
 			Control: []core.Control{
 				{
 					Type:         core.ControlTypeStartPipeline,
-					TransitionID: "test_all_modules",
-					PipelineID:   "pipeline_module",
+					TransitionID: "run_backend_modules",
+					PipelineID:   "pipeline_backend_module",
 					InstanceKey:  "module01",
 					Params:       map[string]string{"module_key": "module01"},
 					AgentBindings: map[string]core.AgentID{
@@ -1092,17 +1051,17 @@ func TestStartPipelineControlInputBagsCanReferenceProducedBagNames(t *testing.T)
 			},
 		},
 	}); err != nil {
-		t.Fatalf("split_module feedback error = %v", err)
+		t.Fatalf("launch_module_development feedback error = %v", err)
 	}
 
-	splitTask, err := taskRepo.Get(ctx, runID, "split_module")
+	splitTask, err := taskRepo.Get(ctx, runID, "architect_launch_module_development")
 	if err != nil {
-		t.Fatalf("Get(split task) error = %v", err)
+		t.Fatalf("Get(source task) error = %v", err)
 	}
 	if got, want := len(splitTask.OutputBagIDs), 2; got != want {
 		t.Fatalf("split output bags = %v, want %d", splitTask.OutputBagIDs, want)
 	}
-	module, err := instanceRepo.Get(ctx, runID, "root_test_all_modules_module01")
+	module, err := instanceRepo.Get(ctx, runID, "root_run_backend_modules_module01")
 	if err != nil {
 		t.Fatalf("Get(module instance) error = %v", err)
 	}
@@ -1113,14 +1072,14 @@ func TestStartPipelineControlInputBagsCanReferenceProducedBagNames(t *testing.T)
 	if err != nil {
 		t.Fatalf("Get(global instance) error = %v", err)
 	}
-	if global.InputBagIDs["global_test_input"] != splitTask.OutputBagIDs[1] {
-		t.Fatalf("global input bags = %#v, want global output key mapped to %s", global.InputBagIDs, splitTask.OutputBagIDs[1])
+	if global.InputBagIDs["global_test_input"] != "bag_global_test_input" {
+		t.Fatalf("global input bags = %#v, want parent-bound global_test_input bag_global_test_input", global.InputBagIDs)
 	}
 }
 
 func TestStartPipelineControlMissingSignatureBindingDoesNotCreatePartialInstances(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -1148,44 +1107,24 @@ func TestStartPipelineControlMissingSignatureBindingDoesNotCreatePartialInstance
 	service.SetPipelineInstanceRepository(instanceRepo)
 
 	const runID core.RunID = "run_start_pipeline_missing_binding"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	if err := taskRepo.Create(ctx, core.Task{
-		ID:        "split_module",
-		RunID:     runID,
-		StageID:   "split_module",
-		AgentRole: core.AgentRoleArchitect,
-		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
-		Status:    core.TaskStatusDispatched,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, nil)
+	if err := taskRepo.Create(ctx, createLaunchModuleDevelopmentTask(runID, now)); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 
 	err = service.OnFeedback(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Control: []core.Control{
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module01",
 				Params:       map[string]string{"module_key": "module01"},
 				AgentBindings: map[string]core.AgentID{
@@ -1212,7 +1151,7 @@ func TestStartPipelineControlMissingSignatureBindingDoesNotCreatePartialInstance
 
 func TestPipelineInstanceTaskFeedbackDoesNotAdvanceRootPipeline(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -1243,43 +1182,24 @@ func TestPipelineInstanceTaskFeedbackDoesNotAdvanceRootPipeline(t *testing.T) {
 	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_instance_task_feedback"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	if err := taskRepo.Create(ctx, core.Task{
-		ID:        "split_module",
-		RunID:     runID,
-		StageID:   "split_module",
-		AgentRole: core.AgentRoleArchitect,
-		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
-		Status:    core.TaskStatusDispatched,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootLaunchBags(t, ctx, doujiaGitRepo, runID, now)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, nil)
+	if err := taskRepo.Create(ctx, createLaunchModuleDevelopmentTask(runID, now)); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Control: []core.Control{
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module01",
 				Params:       map[string]string{"module_key": "module01"},
 				AgentBindings: map[string]core.AgentID{
@@ -1290,10 +1210,10 @@ func TestPipelineInstanceTaskFeedbackDoesNotAdvanceRootPipeline(t *testing.T) {
 			},
 		},
 	}); err != nil {
-		t.Fatalf("split_module feedback error = %v", err)
+		t.Fatalf("launch_module_development feedback error = %v", err)
 	}
 
-	codeTaskID := core.TaskID("root_test_all_modules_module01_write_code_single_write_code")
+	codeTaskID := core.TaskID("root_run_backend_modules_module01_write_code_single_write_code")
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction:    core.TaskDirectionFeedback,
 		RunID:        runID,
@@ -1313,7 +1233,7 @@ func TestPipelineInstanceTaskFeedbackDoesNotAdvanceRootPipeline(t *testing.T) {
 	if run.Status != core.RunStatusRunning {
 		t.Fatalf("run status = %s, want still running", run.Status)
 	}
-	instance, err := instanceRepo.Get(ctx, runID, "root_test_all_modules_module01_write_code_single")
+	instance, err := instanceRepo.Get(ctx, runID, "root_run_backend_modules_module01_write_code_single")
 	if err != nil {
 		t.Fatalf("Get(code instance) error = %v", err)
 	}
@@ -1492,7 +1412,7 @@ func TestPipelineInstanceTaskFeedbackEntersTransitionToStateBeforeCompletion(t *
 
 func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -1523,43 +1443,24 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_module_aggregate_test_code"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	if err := taskRepo.Create(ctx, core.Task{
-		ID:        "split_module",
-		RunID:     runID,
-		StageID:   "split_module",
-		AgentRole: core.AgentRoleArchitect,
-		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
-		Status:    core.TaskStatusDispatched,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootLaunchBags(t, ctx, doujiaGitRepo, runID, now)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, nil)
+	if err := taskRepo.Create(ctx, createLaunchModuleDevelopmentTask(runID, now)); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Control: []core.Control{
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module01",
 				Params:       map[string]string{"module_key": "module01"},
 				AgentBindings: map[string]core.AgentID{
@@ -1570,16 +1471,7 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 			},
 		},
 	}); err != nil {
-		t.Fatalf("split_module feedback error = %v", err)
-	}
-	moduleInputVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "module_input")
-	if err := doujiaGitRepo.CreateBag(ctx, doujiagit.ArtifactBag{
-		BagID:              "bag_module01",
-		RunID:              runID,
-		ArtifactVersionIDs: []string{moduleInputVersionID},
-		CreatedAt:          now,
-	}); err != nil {
-		t.Fatalf("CreateBag(module input) error = %v", err)
+		t.Fatalf("launch_module_development feedback error = %v", err)
 	}
 	codeVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "coder01", "code")
 	testDataVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "tester01", "test_data")
@@ -1587,7 +1479,7 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction:   core.TaskDirectionFeedback,
 		RunID:       runID,
-		TaskID:      "root_test_all_modules_module01_write_code_single_write_code",
+		TaskID:      "root_run_backend_modules_module01_write_code_single_write_code",
 		AgentID:     "coder01",
 		Op:          core.TaskOpWriteCode,
 		InputBagIDs: []string{"bag_module01"},
@@ -1601,7 +1493,7 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("write_code feedback error = %v", err)
 	}
-	codeTask, err := taskRepo.Get(ctx, runID, "root_test_all_modules_module01_write_code_single_write_code")
+	codeTask, err := taskRepo.Get(ctx, runID, "root_run_backend_modules_module01_write_code_single_write_code")
 	if err != nil {
 		t.Fatalf("Get(code task) error = %v", err)
 	}
@@ -1613,7 +1505,7 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction:   core.TaskDirectionFeedback,
 		RunID:       runID,
-		TaskID:      "root_test_all_modules_module01_write_test_data_single_write_test_data",
+		TaskID:      "root_run_backend_modules_module01_write_test_data_single_write_test_data",
 		AgentID:     "tester01",
 		Op:          core.TaskOpTestData,
 		InputBagIDs: []string{"bag_module01"},
@@ -1627,13 +1519,13 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 	}); err != nil {
 		t.Fatalf("write_test_data feedback error = %v", err)
 	}
-	testDataTask, err := taskRepo.Get(ctx, runID, "root_test_all_modules_module01_write_test_data_single_write_test_data")
+	testDataTask, err := taskRepo.Get(ctx, runID, "root_run_backend_modules_module01_write_test_data_single_write_test_data")
 	if err != nil {
 		t.Fatalf("Get(test data task) error = %v", err)
 	}
 	testDataBagID := testDataTask.OutputBagIDs[0]
 
-	testCodeTaskID := core.TaskID("root_test_all_modules_module01_test_code_single_test_code")
+	testCodeTaskID := core.TaskID("root_run_backend_modules_module01_test_code_single_test_code")
 	testCodeTask, err := taskRepo.Get(ctx, runID, testCodeTaskID)
 	if err != nil {
 		t.Fatalf("Get(test_code task) error = %v", err)
@@ -1644,7 +1536,7 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 	if got := uniqueTestStrings(testCodeTask.InputBagIDs); !sameTestStringSet(got, []string{"bag_module01", codeBagID, testDataBagID}) {
 		t.Fatalf("test_code input bags = %v, want [bag_module01 %s %s]", got, codeBagID, testDataBagID)
 	}
-	module, err := instanceRepo.Get(ctx, runID, "root_test_all_modules_module01")
+	module, err := instanceRepo.Get(ctx, runID, "root_run_backend_modules_module01")
 	if err != nil {
 		t.Fatalf("Get(module instance) error = %v", err)
 	}
@@ -1655,7 +1547,7 @@ func TestPipelineModuleStartsTestCodeAfterCodeAndTestDataComplete(t *testing.T) 
 
 func TestPipelineTestCodeBugDispatchesDebugAndRetriesTestCode(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -1897,7 +1789,7 @@ func TestPipelineTestCodeBugDispatchesDebugAndRetriesTestCode(t *testing.T) {
 
 func TestPipelineDebugCodeExhaustsAttemptsAndFailsRun(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -2173,7 +2065,7 @@ func TestPipelineDebugCodeExhaustsAttemptsAndFailsRun(t *testing.T) {
 
 func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 	ctx := context.Background()
-	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -2204,43 +2096,27 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 	service.SetDoujiaGitRepository(doujiaGitRepo)
 
 	const runID core.RunID = "run_root_global_test_after_merge"
-	now := time.Now().UTC()
-	if err := runRepo.Create(ctx, core.PipelineRun{
-		ID:         runID,
-		PipelineID: "pipeline_full_delivery",
-		Status:     core.RunStatusRunning,
-		ProjectDir: t.TempDir(),
-		Config:     noopRunConfig(),
-		CreatedAt:  now,
-		UpdatedAt:  now,
-	}); err != nil {
-		t.Fatalf("Create(run) error = %v", err)
-	}
-	if err := taskRepo.Create(ctx, core.Task{
-		ID:        "split_module",
-		RunID:     runID,
-		StageID:   "split_module",
-		AgentRole: core.AgentRoleArchitect,
-		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
-		Status:    core.TaskStatusDispatched,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}); err != nil {
-		t.Fatalf("Create(split task) error = %v", err)
+	now := mustCreateRunReposForV2(t, ctx, runRepo, runID)
+	seedFullDeliveryRootLaunchBags(t, ctx, doujiaGitRepo, runID, now)
+	seedFullDeliveryRootInstanceForLaunch(t, ctx, instanceRepo, runID, now, map[string]core.AgentID{
+		"front":  "front01",
+		"tester": "front_tester01",
+	})
+	if err := taskRepo.Create(ctx, createLaunchModuleDevelopmentTask(runID, now)); err != nil {
+		t.Fatalf("Create(source task) error = %v", err)
 	}
 	if err := service.OnFeedback(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionFeedback,
 		RunID:     runID,
-		TaskID:    "split_module",
+		TaskID:    "architect_launch_module_development",
 		AgentID:   "architect01",
-		Op:        core.TaskOpSplitModule,
+		Op:        "launch_module_development",
 		Result:    core.TaskResultCodeOK,
 		Control: []core.Control{
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module01",
 				Params:       map[string]string{"module_key": "module01"},
 				AgentBindings: map[string]core.AgentID{
@@ -2251,8 +2127,8 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 			},
 			{
 				Type:         core.ControlTypeStartPipeline,
-				TransitionID: "test_all_modules",
-				PipelineID:   "pipeline_module",
+				TransitionID: "run_backend_modules",
+				PipelineID:   "pipeline_backend_module",
 				InstanceKey:  "module02",
 				Params:       map[string]string{"module_key": "module02"},
 				AgentBindings: map[string]core.AgentID{
@@ -2263,60 +2139,25 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 			},
 			{
 				Type:         core.ControlTypeStartPipeline,
+				TransitionID: "run_front_module_slot",
+				PipelineID:   "pipeline_front_module_slot",
+				InstanceKey:  "front_slot",
+				InputBags:    map[string]string{"front_module_input": "bag_unused_front_control"},
+			},
+			{
+				Type:         core.ControlTypeStartPipeline,
 				TransitionID: "write_global_test_data",
 				PipelineID:   "pipeline_global_test_data",
 				InstanceKey:  "global",
-				InputBags:    map[string]string{"global_test_input": "bag_global_test_input"},
+				InputBags:    map[string]string{"global_test_input": "bag_unused_global_control"},
 			},
 		},
 	}); err != nil {
-		t.Fatalf("split_module feedback error = %v", err)
-	}
-	containerContextVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "container_context")
-	if err := doujiaGitRepo.CreateBag(ctx, doujiagit.ArtifactBag{
-		BagID:              "bag_container_context",
-		RunID:              runID,
-		ArtifactVersionIDs: []string{containerContextVersionID},
-		CreatedAt:          now,
-	}); err != nil {
-		t.Fatalf("CreateBag(container context) error = %v", err)
+		t.Fatalf("launch_module_development feedback error = %v", err)
 	}
 	root, err := instanceRepo.Get(ctx, runID, "root")
 	if err != nil {
-		t.Fatalf("Get(root after split_module) error = %v", err)
-	}
-	if root.OutputBagIDs == nil {
-		root.OutputBagIDs = make(map[string]string)
-	}
-	if root.OutputBagIDLists == nil {
-		root.OutputBagIDLists = make(map[string][]string)
-	}
-	root.OutputBagIDs["container_context"] = "bag_container_context"
-	root.OutputBagIDLists["container_context"] = []string{"bag_container_context"}
-	globalInputVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "global_test_input")
-	if err := doujiaGitRepo.CreateBag(ctx, doujiagit.ArtifactBag{
-		BagID:              "bag_global_test_input",
-		RunID:              runID,
-		ArtifactVersionIDs: []string{globalInputVersionID},
-		CreatedAt:          now,
-	}); err != nil {
-		t.Fatalf("CreateBag(global test input) error = %v", err)
-	}
-	root.OutputBagIDs["global_test_input"] = "bag_global_test_input"
-	root.OutputBagIDLists["global_test_input"] = []string{"bag_global_test_input"}
-	if err := instanceRepo.Update(ctx, root); err != nil {
-		t.Fatalf("Update(root context bags) error = %v", err)
-	}
-	for _, moduleKey := range []string{"module01", "module02"} {
-		versionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", moduleKey+"_input")
-		if err := doujiaGitRepo.CreateBag(ctx, doujiagit.ArtifactBag{
-			BagID:              "bag_" + moduleKey,
-			RunID:              runID,
-			ArtifactVersionIDs: []string{versionID},
-			CreatedAt:          now,
-		}); err != nil {
-			t.Fatalf("CreateBag(%s input) error = %v", moduleKey, err)
-		}
+		t.Fatalf("Get(root after launch_module_development) error = %v", err)
 	}
 
 	completeModuleHappyPath := func(moduleKey string, coderID string, testerID string) string {
@@ -2324,7 +2165,7 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 		codeVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, coderID, moduleKey+"_code")
 		testDataVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, testerID, moduleKey+"_test_data")
 		testedVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, testerID, moduleKey+"_tested")
-		prefix := core.TaskID("root_test_all_modules_" + moduleKey)
+		prefix := core.TaskID("root_run_backend_modules_" + moduleKey)
 		if err := service.OnFeedback(ctx, core.TaskMetaData{
 			Direction:   core.TaskDirectionFeedback,
 			RunID:       runID,
@@ -2388,10 +2229,145 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 	}
 	module02BagID := completeModuleHappyPath("module02", "coder02", "tester02")
 
+	frontTestedVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "front_tester01", "front_tested")
+	frontCodeVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "front01", "front_code")
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      "root_run_front_module_slot_front_slot_run_front_module_single_write_code_single_write_code",
+		AgentID:     "front01",
+		Op:          core.TaskOpWriteCode,
+		InputBagIDs: []string{"bag_front_module_input"},
+		Result:      core.TaskResultCodeOK,
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeOK,
+			ProducedBags: []core.CommittedBagDef{{Name: "code_bag", ArtifactVersionIDs: []string{frontCodeVersionID}, Indexes: map[string]string{"module_key": "frontend", "coder_alias": "front01"}}},
+		},
+	}); err != nil {
+		t.Fatalf("front write_code feedback error = %v", err)
+	}
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      "root_run_front_module_slot_front_slot_run_front_module_single_write_test_data_single_write_test_data",
+		AgentID:     "front_tester01",
+		Op:          core.TaskOpTestData,
+		InputBagIDs: []string{"bag_front_module_input"},
+		Result:      core.TaskResultCodeOK,
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeOK,
+			ProducedBags: []core.CommittedBagDef{{Name: "test_data_bag", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "front_tester01", "front_test_data")}, Indexes: map[string]string{"module_key": "frontend", "tester_alias": "front_tester01"}}},
+		},
+	}); err != nil {
+		t.Fatalf("front write_test_data feedback error = %v", err)
+	}
+	frontTestCodeTask, err := taskRepo.Get(ctx, runID, "root_run_front_module_slot_front_slot_run_front_module_single_test_code_single_test_code")
+	if err != nil {
+		t.Fatalf("Get(front test_code task) error = %v", err)
+	}
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      frontTestCodeTask.ID,
+		AgentID:     "front_tester01",
+		Op:          core.TaskOpTestCode,
+		InputBagIDs: frontTestCodeTask.InputBagIDs,
+		Result:      core.TaskResultCodeOK,
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeOK,
+			ProducedBags: []core.CommittedBagDef{{Name: "tested_module", ArtifactVersionIDs: []string{frontTestedVersionID}, Indexes: map[string]string{"module_key": "frontend", "tester_alias": "front_tester01"}}},
+		},
+	}); err != nil {
+		t.Fatalf("front test_code feedback error = %v", err)
+	}
+	frontPreviewTask, err := taskRepo.Get(ctx, runID, "root_run_front_module_slot_front_slot_run_front_module_single_preview_edit")
+	if err != nil {
+		t.Fatalf("Get(front preview task) error = %v", err)
+	}
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      frontPreviewTask.ID,
+		AgentID:     "front01",
+		Op:          "preview_edit",
+		InputBagIDs: frontPreviewTask.InputBagIDs,
+		Result:      core.TaskResultCodeOK,
+		Commit: &core.CommitReceipt{
+			Result: core.TaskResultCodeOK,
+			ProducedBags: []core.CommittedBagDef{
+				{Name: "preview_edit_bag", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "front01", "preview_edit_bag")}, Indexes: map[string]string{"module_key": "frontend"}},
+				{Name: "preview_result", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "front01", "preview_result")}, Indexes: map[string]string{"module_key": "frontend"}},
+				{Name: "preview_url", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "front01", "preview_url")}, Indexes: map[string]string{"module_key": "frontend"}},
+			},
+		},
+	}); err != nil {
+		t.Fatalf("preview_edit feedback error = %v", err)
+	}
+	frontReviewTask, err := taskRepo.Get(ctx, runID, "root_run_front_module_slot_front_slot_run_front_module_single_user_preview_review")
+	if err != nil {
+		t.Fatalf("Get(user preview review task) error = %v", err)
+	}
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      frontReviewTask.ID,
+		AgentID:     "ceo",
+		Op:          "user_preview_review",
+		InputBagIDs: frontReviewTask.InputBagIDs,
+		Result:      core.TaskResultCodeOK,
+		Commit: &core.CommitReceipt{
+			Result: core.TaskResultCodeOK,
+		},
+	}); err != nil {
+		t.Fatalf("user_preview_review feedback error = %v", err)
+	}
+	frontCompleteTask, err := taskRepo.Get(ctx, runID, "root_run_front_module_slot_front_slot_complete_front_slot")
+	if err != nil {
+		t.Fatalf("Get(complete front slot task) error = %v", err)
+	}
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      frontCompleteTask.ID,
+		AgentID:     "architect01",
+		Op:          "complete_front_slot",
+		InputBagIDs: frontCompleteTask.InputBagIDs,
+		Result:      core.TaskResultCodeOK,
+		Commit: &core.CommitReceipt{
+			Result:       core.TaskResultCodeOK,
+			ProducedBags: []core.CommittedBagDef{{Name: "front_slot_result", ArtifactVersionIDs: []string{createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "front_slot_result")}}},
+		},
+	}); err != nil {
+		t.Fatalf("complete_front_slot feedback error = %v", err)
+	}
+	frontSlotInstance, err := instanceRepo.Get(ctx, runID, "root_run_front_module_slot_front_slot")
+	if err != nil {
+		t.Fatalf("Get(front slot instance) error = %v", err)
+	}
+	if frontSlotInstance.Status != core.PipelineInstanceStatusCompleted {
+		t.Fatalf("front slot instance status = %s, want completed", frontSlotInstance.Status)
+	}
+	module01Instance, err := instanceRepo.Get(ctx, runID, "root_run_backend_modules_module01")
+	if err != nil {
+		t.Fatalf("Get(module01 instance) error = %v", err)
+	}
+	if module01Instance.Status != core.PipelineInstanceStatusCompleted {
+		t.Fatalf("module01 instance status = %s, want completed", module01Instance.Status)
+	}
+	module02Instance, err := instanceRepo.Get(ctx, runID, "root_run_backend_modules_module02")
+	if err != nil {
+		t.Fatalf("Get(module02 instance) error = %v", err)
+	}
+	if module02Instance.Status != core.PipelineInstanceStatusCompleted {
+		t.Fatalf("module02 instance status = %s, want completed", module02Instance.Status)
+	}
+
 	mergeTaskID := core.TaskID("root_merge_code_single_merge_code")
 	mergeTask, err := taskRepo.Get(ctx, runID, mergeTaskID)
 	if err != nil {
-		t.Fatalf("Get(merge task) error = %v", err)
+		tasks, _ := taskRepo.ListByRun(ctx, runID)
+		instances, _ := instanceRepo.ListByRun(ctx, runID)
+		t.Fatalf("Get(merge task) error = %v; tasks=%#v; instances=%#v", err, tasks, instances)
 	}
 	if mergeTask.AgentID != "architect01" || mergeTask.Status != core.TaskStatusDispatched {
 		t.Fatalf("merge task = %#v", mergeTask)
@@ -2400,12 +2376,19 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(root) error = %v", err)
 	}
-	wantMergeInputs := append([]string{module01BagID, module02BagID, "bag_container_context", "bag_global_test_input"}, root.OutputBagIDLists["code_bag"]...)
-	if got := uniqueTestStrings(mergeTask.InputBagIDs); !sameTestStringSet(got, wantMergeInputs) {
-		t.Fatalf("merge input bags = %v, want %v", got, wantMergeInputs)
+	wantMergeInputs := []string{
+		module01BagID,
+		module02BagID,
+		"bag_container_context",
+		"bag_global_test_input",
+		module01Instance.OutputBagIDs["code_bag"],
+		module02Instance.OutputBagIDs["code_bag"],
 	}
-	if got := root.OutputBagIDLists["tested_module"]; !sameTestStringSet(got, []string{module01BagID, module02BagID}) {
-		t.Fatalf("root tested_module list = %v, want [%s %s]", got, module01BagID, module02BagID)
+	if got := uniqueTestStrings(mergeTask.InputBagIDs); !sameTestStringSet(got, wantMergeInputs) {
+		t.Fatalf("merge input bags = %v, bindings=%#v, want %v", got, mergeTask.InputBags, wantMergeInputs)
+	}
+	if got := uniqueTestStrings(root.OutputBagIDLists["tested_module"]); !containsString(got, module01BagID) || !containsString(got, module02BagID) || len(got) != 3 {
+		t.Fatalf("root tested_module list = %v, want backend module bags plus one frontend tested bag", got)
 	}
 	if _, err := taskRepo.Get(ctx, runID, "root_global_test_code_single_global_test_code"); err == nil {
 		t.Fatalf("global_test_code should wait for merge_code and global_test_data")
@@ -2476,39 +2459,8 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 	if globalTestTask.AgentID != "architect01" || globalTestTask.Status != core.TaskStatusDispatched {
 		t.Fatalf("global test task = %#v", globalTestTask)
 	}
-	if got := uniqueTestStrings(globalTestTask.InputBagIDs); len(got) != 1 {
-		t.Fatalf("global test input bags = %v, want one synthesized global_test_code_input bag", got)
-	}
-	globalTestInputBagID := globalTestTask.InputBagIDs[0]
-	if globalTestInputBagID == mergedBagID || globalTestInputBagID == globalDataBagID {
-		t.Fatalf("global test input bag = %s, want synthesized bag not a source bag", globalTestInputBagID)
-	}
-	globalTestInputBag, err := doujiaGitRepo.GetBag(ctx, globalTestInputBagID)
-	if err != nil {
-		t.Fatalf("GetBag(global test input) error = %v", err)
-	}
-	mergedBag, err := doujiaGitRepo.GetBag(ctx, mergedBagID)
-	if err != nil {
-		t.Fatalf("GetBag(merged) error = %v", err)
-	}
-	globalDataBag, err := doujiaGitRepo.GetBag(ctx, globalDataBagID)
-	if err != nil {
-		t.Fatalf("GetBag(global data) error = %v", err)
-	}
-	containerBag, err := doujiaGitRepo.GetBag(ctx, "bag_container_context")
-	if err != nil {
-		t.Fatalf("GetBag(container context) error = %v", err)
-	}
-	wantGlobalTestVersions := uniqueTestStrings(append(append(append([]string{}, containerBag.ArtifactVersionIDs...), mergedBag.ArtifactVersionIDs...), globalDataBag.ArtifactVersionIDs...))
-	if got := uniqueTestStrings(globalTestInputBag.ArtifactVersionIDs); !sameTestStringSet(got, wantGlobalTestVersions) {
-		t.Fatalf("global test input bag versions = %v, want %v", got, wantGlobalTestVersions)
-	}
-	root, err = instanceRepo.Get(ctx, runID, "root")
-	if err != nil {
-		t.Fatalf("Get(root after global ready) error = %v", err)
-	}
-	if got := root.InputBagIDLists["global_test_code_input"]; !sameTestStringSet(got, []string{globalTestInputBagID}) {
-		t.Fatalf("global_test_code_input list = %v, want [%s]", got, globalTestInputBagID)
+	if got := uniqueTestStrings(globalTestTask.InputBagIDs); !sameTestStringSet(got, []string{mergedBagID, globalDataBagID}) {
+		t.Fatalf("global test input bags = %v, want merged_code and global_test_data bags", got)
 	}
 
 	reportVersionID := createDoujiaGitVersion(t, ctx, doujiaGitRepo, runID, "architect01", "global_test_report")
@@ -2531,22 +2483,29 @@ func TestRootStartsGlobalTestAfterMergeAndGlobalDataComplete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(root after delivery) error = %v", err)
 	}
-	if root.Status != core.PipelineInstanceStatusCompleted {
-		t.Fatalf("root status = %s, want completed", root.Status)
+	if root.Status != core.PipelineInstanceStatusRunning {
+		t.Fatalf("root status = %s, want running before delivery_review completes", root.Status)
 	}
 	if root.OutputBagIDs["global_test_report"] == "" {
 		t.Fatalf("root output bags = %#v, want global_test_report", root.OutputBagIDs)
+	}
+	deliveryReviewTask, err := taskRepo.Get(ctx, runID, "root_delivery_review_single_delivery_review")
+	if err != nil {
+		t.Fatalf("Get(delivery review task) error = %v", err)
+	}
+	if deliveryReviewTask.Status != core.TaskStatusDispatched || deliveryReviewTask.AgentID != "front01" {
+		t.Fatalf("delivery review task = %#v", deliveryReviewTask)
 	}
 	run, err := runRepo.Get(ctx, runID)
 	if err != nil {
 		t.Fatalf("Get(run) error = %v", err)
 	}
-	if run.Status != core.RunStatusAwaitingAcceptance {
-		t.Fatalf("run status = %s, want awaiting_acceptance", run.Status)
+	if run.Status != core.RunStatusRunning {
+		t.Fatalf("run status = %s, want running before delivery_review feedback", run.Status)
 	}
 }
 
-func TestOnFeedbackFailMarksTaskAndRunFailed(t *testing.T) {
+func TestOnFeedbackKFailBlocksTaskAndRunForManualRefRecovery(t *testing.T) {
 	bootstrap := app.NewBootstrap(t.TempDir())
 	ctx := context.Background()
 
@@ -2582,18 +2541,134 @@ func TestOnFeedbackFailMarksTaskAndRunFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get(task_02) error = %v", err)
 	}
-	if task.Status != core.TaskStatusFailed {
-		t.Fatalf("task_02 status = %s, want %s", task.Status, core.TaskStatusFailed)
+	if task.Status != core.TaskStatusBlocked {
+		t.Fatalf("task_02 status = %s, want %s", task.Status, core.TaskStatusBlocked)
 	}
 	run, err := bootstrap.Internals.RunRepository.Get(ctx, runID)
 	if err != nil {
 		t.Fatalf("Get(run) error = %v", err)
 	}
-	if run.Status != core.RunStatusFailed {
-		t.Fatalf("run status = %s, want %s", run.Status, core.RunStatusFailed)
+	if run.Status != core.RunStatus("blocked") {
+		t.Fatalf("run status = %s, want blocked", run.Status)
 	}
 	if _, err := bootstrap.Internals.TaskRepository.Get(ctx, runID, "task_03"); err == nil {
-		t.Fatalf("task_03 should not be created after failed feedback")
+		t.Fatalf("task_03 should not be created after blocked feedback")
+	}
+}
+
+func TestPipelineInstanceKFailBlocksRunForManualRefRecovery(t *testing.T) {
+	ctx := context.Background()
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec() error = %v", err)
+	}
+	definitions, err := pipeline.NewJSONRegistry(registrySpec)
+	if err != nil {
+		t.Fatalf("NewJSONRegistry() error = %v", err)
+	}
+	legacyRegistry, err := pipeline.NewLegacyRegistryFromSpec(registrySpec, "pipeline_test_code")
+	if err != nil {
+		t.Fatalf("NewLegacyRegistryFromSpec() error = %v", err)
+	}
+	runRepo := repo.NewMemoryRunRepository()
+	instanceRepo := repo.NewMemoryPipelineInstanceRepository()
+	taskRepo := repo.NewMemoryTaskRepository()
+	service := orchestrator.NewService(
+		legacyRegistry,
+		runRepo,
+		taskRepo,
+		recordingProvisioner{},
+		&recordingDispatcher{},
+		&recordingSessionRuntime{},
+		nil,
+	)
+	service.SetPipelineDefinitionRegistry(definitions)
+	service.SetPipelineInstanceRepository(instanceRepo)
+
+	const runID core.RunID = "run_instance_kfail_blocked"
+	now := time.Now().UTC()
+	if err := runRepo.Create(ctx, core.PipelineRun{
+		ID:         runID,
+		PipelineID: "pipeline_test_code",
+		Status:     core.RunStatusRunning,
+		ProjectDir: t.TempDir(),
+		Config:     noopRunConfig(),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatalf("Create(run) error = %v", err)
+	}
+	if err := instanceRepo.Create(ctx, core.PipelineInstance{
+		ID:            "root",
+		RunID:         runID,
+		PipelineID:    "pipeline_test_code",
+		InstanceKey:   "root",
+		Status:        core.PipelineInstanceStatusRunning,
+		Params:        map[string]string{"module_key": "module01"},
+		AgentBindings: map[string]core.AgentID{"coder": "coder01", "tester": "tester01"},
+		InputBagIDs: map[string]string{
+			"module_input":  "bag_module_input",
+			"code_bag":      "bag_module_code",
+			"test_data_bag": "bag_module_test_data",
+		},
+		InputBagIDLists: map[string][]string{
+			"module_input":  {"bag_module_input"},
+			"code_bag":      {"bag_module_code"},
+			"test_data_bag": {"bag_module_test_data"},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("Create(root instance) error = %v", err)
+	}
+	if err := taskRepo.Create(ctx, core.Task{
+		ID:                 "root_test_code",
+		RunID:              runID,
+		PipelineInstanceID: "root",
+		StageID:            "test_code",
+		AgentRole:          core.AgentRoleTester,
+		AgentID:            "tester01",
+		Op:                 core.TaskOpTestCode,
+		Status:             core.TaskStatusDispatched,
+		InputBagIDs:        []string{"bag_module_input", "bag_module_code", "bag_module_test_data"},
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}); err != nil {
+		t.Fatalf("Create(test_code task) error = %v", err)
+	}
+
+	if err := service.OnFeedback(ctx, core.TaskMetaData{
+		Direction:   core.TaskDirectionFeedback,
+		RunID:       runID,
+		TaskID:      "root_test_code",
+		AgentID:     "tester01",
+		Op:          core.TaskOpTestCode,
+		InputBagIDs: []string{"bag_module_input", "bag_module_code", "bag_module_test_data"},
+		Result:      core.TaskResultCodeFail,
+	}); err != nil {
+		t.Fatalf("test_code kfail feedback error = %v", err)
+	}
+
+	task, err := taskRepo.Get(ctx, runID, "root_test_code")
+	if err != nil {
+		t.Fatalf("Get(test_code task) error = %v", err)
+	}
+	if task.Status != core.TaskStatusBlocked {
+		t.Fatalf("test_code status = %s, want blocked", task.Status)
+	}
+	run, err := runRepo.Get(ctx, runID)
+	if err != nil {
+		t.Fatalf("Get(run) error = %v", err)
+	}
+	if run.Status != core.RunStatus("blocked") {
+		t.Fatalf("run status = %s, want blocked", run.Status)
+	}
+	instance, err := instanceRepo.Get(ctx, runID, "root")
+	if err != nil {
+		t.Fatalf("Get(root instance) error = %v", err)
+	}
+	if instance.Status != core.PipelineInstanceStatusRunning {
+		t.Fatalf("root instance status = %s, want still running for manual recovery", instance.Status)
 	}
 }
 
@@ -4094,15 +4169,15 @@ func runPhaseTwoStubFlow(t *testing.T, projectsRoot string, runID core.RunID) co
 	feedback, err := session.Agent.Execute(ctx, core.TaskMetaData{
 		Direction: core.TaskDirectionDispatch,
 		RunID:     runID,
-		TaskID:    "ceo_write_requirement",
+		TaskID:    "task_01",
 		AgentID:   "ceo",
 		Op:        core.TaskOpWritePlan,
 	})
 	if err != nil {
-		t.Fatalf("ceo_write_requirement execute error = %v", err)
+		t.Fatalf("task_01 execute error = %v", err)
 	}
 	if err := bootstrap.Internals.Orchestrator.OnFeedback(ctx, feedback); err != nil {
-		t.Fatalf("ceo_write_requirement feedback error = %v", err)
+		t.Fatalf("task_01 feedback error = %v", err)
 	}
 
 	run := waitForRunStatus(t, ctx, bootstrap, runID, core.RunStatusAwaitingAcceptance)
@@ -4342,7 +4417,7 @@ func countDispatchOp(items []core.TaskMetaData, op string) int {
 
 func writeProtocolMockForceBugRegistry(t *testing.T) string {
 	t.Helper()
-	spec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	spec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -4360,7 +4435,7 @@ func writeProtocolMockForceBugRegistry(t *testing.T) string {
 
 func writeProtocolMockForceBugOnceRegistry(t *testing.T) string {
 	t.Helper()
-	spec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json"))
+	spec, err := pipeline.LoadRegistrySpec(filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json"))
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
 	}
@@ -4655,6 +4730,135 @@ func artifactRefsToStringsForTest(items []core.ArtifactRef) []string {
 	return out
 }
 
+func mustCreateRunReposForV2(t *testing.T, ctx context.Context, runRepo repo.RunRepository, runID core.RunID) time.Time {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := runRepo.Create(ctx, core.PipelineRun{
+		ID:         runID,
+		PipelineID: "pipeline_full_delivery",
+		Status:     core.RunStatusRunning,
+		ProjectDir: t.TempDir(),
+		Config:     noopRunConfig(),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}); err != nil {
+		t.Fatalf("Create(run) error = %v", err)
+	}
+	return now
+}
+
+func createBagWithVersion(t *testing.T, ctx context.Context, repository doujiagit.Repository, runID core.RunID, bagID string, namespace string, logicalKey string, createdAt time.Time) string {
+	t.Helper()
+	versionID := createDoujiaGitVersion(t, ctx, repository, runID, namespace, logicalKey)
+	if err := repository.CreateBag(ctx, doujiagit.ArtifactBag{
+		BagID:              bagID,
+		RunID:              runID,
+		ArtifactVersionIDs: []string{versionID},
+		CreatedAt:          createdAt,
+	}); err != nil {
+		t.Fatalf("CreateBag(%s) error = %v", bagID, err)
+	}
+	return versionID
+}
+
+func seedFullDeliveryRootInstanceForLaunch(
+	t *testing.T,
+	ctx context.Context,
+	instanceRepo repo.PipelineInstanceRepository,
+	runID core.RunID,
+	now time.Time,
+	extraAgentBindings map[string]core.AgentID,
+) core.PipelineInstance {
+	t.Helper()
+	root := core.PipelineInstance{
+		ID:          "root",
+		RunID:       runID,
+		PipelineID:  "pipeline_full_delivery",
+		InstanceKey: "root",
+		Status:      core.PipelineInstanceStatusRunning,
+		AgentBindings: map[string]core.AgentID{
+			"ceo":       "ceo",
+			"pm":        "pm01",
+			"architect": "architect01",
+		},
+		InputBagIDs: map[string]string{
+			"container_context":                                      "bag_container_context",
+			"module_manifest":                                        "bag_module_manifest",
+			"module_input[module_key=module01]":                      "bag_module01",
+			"module_input[module_key=module02]":                      "bag_module02",
+			"front_module_input":                                     "bag_front_module_input",
+			"global_test_input":                                      "bag_global_test_input",
+		},
+		InputBagIDLists: map[string][]string{
+			"container_context":                 {"bag_container_context"},
+			"module_manifest":                   {"bag_module_manifest"},
+			"module_input":                      {"bag_module01", "bag_module02"},
+			"module_input[module_key=module01]": {"bag_module01"},
+			"module_input[module_key=module02]": {"bag_module02"},
+			"front_module_input":                {"bag_front_module_input"},
+			"global_test_input":                 {"bag_global_test_input"},
+		},
+		OutputBagIDs: map[string]string{
+			"container_context":                                      "bag_container_context",
+			"module_manifest":                                        "bag_module_manifest",
+			"module_input[module_key=module01]":                      "bag_module01",
+			"module_input[module_key=module02]":                      "bag_module02",
+			"front_module_input":                                     "bag_front_module_input",
+			"global_test_input":                                      "bag_global_test_input",
+		},
+		OutputBagIDLists: map[string][]string{
+			"container_context":                 {"bag_container_context"},
+			"module_manifest":                   {"bag_module_manifest"},
+			"module_input":                      {"bag_module01", "bag_module02"},
+			"module_input[module_key=module01]": {"bag_module01"},
+			"module_input[module_key=module02]": {"bag_module02"},
+			"front_module_input":                {"bag_front_module_input"},
+			"global_test_input":                 {"bag_global_test_input"},
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	for key, value := range extraAgentBindings {
+		root.AgentBindings[key] = value
+	}
+	if err := instanceRepo.Create(ctx, root); err != nil {
+		t.Fatalf("Create(root instance) error = %v", err)
+	}
+	return root
+}
+
+func seedFullDeliveryRootLaunchBags(t *testing.T, ctx context.Context, repository doujiagit.Repository, runID core.RunID, now time.Time) {
+	t.Helper()
+	createBagWithVersion(t, ctx, repository, runID, "bag_container_context", "architect01", "container_context", now)
+	createBagWithVersion(t, ctx, repository, runID, "bag_module_manifest", "architect01", "module_manifest", now)
+	createBagWithVersion(t, ctx, repository, runID, "bag_module01", "architect01", "module01_input", now)
+	createBagWithVersion(t, ctx, repository, runID, "bag_module02", "architect01", "module02_input", now)
+	createBagWithVersion(t, ctx, repository, runID, "bag_front_module_input", "architect01", "front_module_input", now)
+	createBagWithVersion(t, ctx, repository, runID, "bag_global_test_input", "architect01", "global_test_input", now)
+}
+
+func createLaunchModuleDevelopmentTask(runID core.RunID, now time.Time) core.Task {
+	return core.Task{
+		ID:        "architect_launch_module_development",
+		RunID:     runID,
+		StageID:   "architect_launch_module_development",
+		AgentRole: core.AgentRoleArchitect,
+		AgentID:   "architect01",
+		Op:        "launch_module_development",
+		Status:    core.TaskStatusDispatched,
+		InputBagIDs: []string{
+			"bag_container_context",
+			"bag_module_manifest",
+			"bag_module01",
+			"bag_module02",
+			"bag_front_module_input",
+			"bag_global_test_input",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
 type recordingProvisioner struct{}
 
 func (recordingProvisioner) EnsureAgent(_ context.Context, req runtime.EnsureAgentRequest) (runtime.EnsureAgentResult, error) {
@@ -4690,3 +4894,4 @@ func (r *recordingSessionRuntime) DispatchToSession(_ context.Context, task core
 	r.dispatched = append(r.dispatched, task)
 	return nil
 }
+

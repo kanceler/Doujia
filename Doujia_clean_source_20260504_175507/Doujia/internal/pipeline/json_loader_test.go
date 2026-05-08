@@ -4,10 +4,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"devflow/internal/core"
 )
 
 func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
 	spec, err := LoadRegistrySpec(path)
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
@@ -18,7 +20,7 @@ func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
 	if spec.EntryPipelineID != "pipeline_full_delivery" {
 		t.Fatalf("entry pipeline = %q, want pipeline_full_delivery", spec.EntryPipelineID)
 	}
-	if got, want := len(spec.PipelineDefs), 8; got != want {
+	if got, want := len(spec.PipelineDefs), 16; got != want {
 		t.Fatalf("pipeline defs = %d, want %d", got, want)
 	}
 	entry, ok := spec.Pipeline("pipeline_full_delivery")
@@ -28,23 +30,23 @@ func TestLoadRegistrySpecFullDeliveryJSON(t *testing.T) {
 	if entry.StartState != "delivery_start" || entry.DeliveryState != "delivery_done" {
 		t.Fatalf("entry start/delivery = %s/%s", entry.StartState, entry.DeliveryState)
 	}
-	if !hasTransition(entry, "test_all_modules", "call") {
-		t.Fatalf("entry pipeline should contain test_all_modules call transition")
+	if !hasTransition(entry, "global_test_code", "call") {
+		t.Fatalf("entry pipeline should contain global_test_code call transition")
 	}
-	if !hasTransition(entry, "architect_create_container", "task") {
-		t.Fatalf("entry pipeline should contain architect_create_container task transition")
+	if !hasTransition(entry, "create_container", "call") {
+		t.Fatalf("entry pipeline should contain create_container call transition")
 	}
-	modulePipeline, ok := spec.Pipeline("pipeline_module")
+	modulePipeline, ok := spec.Pipeline("pipeline_backend_module")
 	if !ok {
-		t.Fatalf("pipeline_module not found")
+		t.Fatalf("pipeline_backend_module not found")
 	}
 	if modulePipeline.StartState != "module_input_ready" || modulePipeline.DeliveryState != "module_tested" {
-		t.Fatalf("pipeline_module start/delivery = %s/%s", modulePipeline.StartState, modulePipeline.DeliveryState)
+		t.Fatalf("pipeline_backend_module start/delivery = %s/%s", modulePipeline.StartState, modulePipeline.DeliveryState)
 	}
 }
 
 func TestFullDeliveryMergeCodeCarriesRequiredContext(t *testing.T) {
-	path := filepath.Join("..", "..", "docs", "v2", "pipeline_full_delivery.spec.json")
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
 	spec, err := LoadRegistrySpec(path)
 	if err != nil {
 		t.Fatalf("LoadRegistrySpec() error = %v", err)
@@ -571,6 +573,273 @@ func TestParseRegistrySpecRejectsUnknownOutputBagByResultReference(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "output_bags_by_result") || !strings.Contains(err.Error(), "failure_report") {
 		t.Fatalf("ParseRegistrySpec() error = %v, want output_bags_by_result failure_report reference", err)
+	}
+}
+
+func TestFullDeliveryV2DefinesRequiredPipelines(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
+	spec, err := LoadRegistrySpec(path)
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec() error = %v", err)
+	}
+
+	required := []string{
+		"pipeline_create_container",
+		"pipeline_split_modules",
+		"pipeline_backend_module",
+		"pipeline_front_module_slot",
+		"pipeline_front_module",
+		"pipeline_global_test_data",
+		"pipeline_merge_code",
+		"pipeline_global_test_code",
+		"pipeline_delivery_review",
+		"pipeline_full_delivery",
+	}
+
+	for _, id := range required {
+		if _, ok := spec.Pipeline(core.PipelineID(id)); !ok {
+			t.Fatalf("required pipeline %q not found", id)
+		}
+	}
+}
+
+func requirePipeline(t *testing.T, spec RegistrySpec, id core.PipelineID) PipelineDefSpec {
+	t.Helper()
+	def, ok := spec.Pipeline(id)
+	if !ok {
+		t.Fatalf("pipeline %q not found", id)
+	}
+	return def
+}
+
+func requireState(t *testing.T, def PipelineDefSpec, id string) StateSpec {
+	t.Helper()
+	for _, state := range def.States {
+		if state.ID == id {
+			return state
+		}
+	}
+	t.Fatalf("pipeline %q state %q not found", def.PipelineID, id)
+	return StateSpec{}
+}
+
+func requireTransition(t *testing.T, def PipelineDefSpec, id string) TransitionSpec {
+	t.Helper()
+	for _, transition := range def.Transitions {
+		if transition.ID == id {
+			return transition
+		}
+	}
+	t.Fatalf("pipeline %q transition %q not found", def.PipelineID, id)
+	return TransitionSpec{}
+}
+
+func TestFullDeliveryV2MainFlowDependencies(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
+	spec, err := LoadRegistrySpec(path)
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec() error = %v", err)
+	}
+	entry := requirePipeline(t, spec, "pipeline_full_delivery")
+
+	launchParallel := requireTransition(t, entry, "architect_launch_parallel_work")
+	if launchParallel.Kind != "task" {
+		t.Fatalf("architect_launch_parallel_work.kind = %q, want task", launchParallel.Kind)
+	}
+	if launchParallel.Op == "" {
+		t.Fatalf("architect_launch_parallel_work.op is empty, want fanout op")
+	}
+
+	createContainer := requireTransition(t, entry, "create_container")
+	if createContainer.Kind != "call" {
+		t.Fatalf("create_container.kind = %q, want call", createContainer.Kind)
+	}
+	if createContainer.PipelineID != "pipeline_create_container" {
+		t.Fatalf("create_container.pipeline_id = %q, want pipeline_create_container", createContainer.PipelineID)
+	}
+
+	splitModules := requireTransition(t, entry, "split_modules")
+	if splitModules.Kind != "call" {
+		t.Fatalf("split_modules.kind = %q, want call", splitModules.Kind)
+	}
+	if splitModules.PipelineID != "pipeline_split_modules" {
+		t.Fatalf("split_modules.pipeline_id = %q, want pipeline_split_modules", splitModules.PipelineID)
+	}
+
+	developmentReady := requireState(t, entry, "development_ready")
+	if developmentReady.Kind != "aggregate" || developmentReady.Proof.Mode != "all" {
+		t.Fatalf("development_ready = %+v, want aggregate all", developmentReady)
+	}
+	if !containsString(developmentReady.Proof.States, "container_ready") {
+		t.Fatalf("development_ready states = %v, want container_ready", developmentReady.Proof.States)
+	}
+	if !containsString(developmentReady.Proof.States, "modules_split") {
+		t.Fatalf("development_ready states = %v, want modules_split", developmentReady.Proof.States)
+	}
+
+	frontSlot := requireTransition(t, entry, "run_front_module_slot")
+	if frontSlot.Kind != "call" {
+		t.Fatalf("run_front_module_slot.kind = %q, want call", frontSlot.Kind)
+	}
+	if frontSlot.PipelineID != "pipeline_front_module_slot" {
+		t.Fatalf("run_front_module_slot.pipeline_id = %q, want pipeline_front_module_slot", frontSlot.PipelineID)
+	}
+
+	backendModules := requireTransition(t, entry, "run_backend_modules")
+	if backendModules.Kind != "call" {
+		t.Fatalf("run_backend_modules.kind = %q, want call", backendModules.Kind)
+	}
+	if backendModules.PipelineID != "pipeline_backend_module" {
+		t.Fatalf("run_backend_modules.pipeline_id = %q, want pipeline_backend_module", backendModules.PipelineID)
+	}
+
+	globalTestData := requireTransition(t, entry, "write_global_test_data")
+	if globalTestData.Kind != "call" {
+		t.Fatalf("write_global_test_data.kind = %q, want call", globalTestData.Kind)
+	}
+	if globalTestData.PipelineID != "pipeline_global_test_data" {
+		t.Fatalf("write_global_test_data.pipeline_id = %q, want pipeline_global_test_data", globalTestData.PipelineID)
+	}
+
+	modulesDone := requireState(t, entry, "modules_done")
+	if modulesDone.Kind != "aggregate" || modulesDone.Proof.Mode != "all" {
+		t.Fatalf("modules_done = %+v, want aggregate all", modulesDone)
+	}
+	if !containsString(modulesDone.Proof.States, "front_module_slot_done") {
+		t.Fatalf("modules_done states = %v, want front_module_slot_done", modulesDone.Proof.States)
+	}
+	if !containsString(modulesDone.Proof.States, "backend_modules_done") {
+		t.Fatalf("modules_done states = %v, want backend_modules_done", modulesDone.Proof.States)
+	}
+
+	mergeCode := requireTransition(t, entry, "merge_code")
+	if mergeCode.FromState != "modules_done" {
+		t.Fatalf("merge_code.from_state = %q, want modules_done", mergeCode.FromState)
+	}
+	if mergeCode.PipelineID != "pipeline_merge_code" {
+		t.Fatalf("merge_code.pipeline_id = %q, want pipeline_merge_code", mergeCode.PipelineID)
+	}
+
+	globalTestReady := requireState(t, entry, "global_test_ready")
+	if globalTestReady.Kind != "aggregate" || globalTestReady.Proof.Mode != "all" {
+		t.Fatalf("global_test_ready = %+v, want aggregate all", globalTestReady)
+	}
+	if !containsString(globalTestReady.Proof.States, "code_merged") {
+		t.Fatalf("global_test_ready states = %v, want code_merged", globalTestReady.Proof.States)
+	}
+	if !containsString(globalTestReady.Proof.States, "global_test_data_ready") {
+		t.Fatalf("global_test_ready states = %v, want global_test_data_ready", globalTestReady.Proof.States)
+	}
+}
+
+func TestBackendModuleDeclaresRecoverableCodeHandler(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
+	spec, err := LoadRegistrySpec(path)
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec() error = %v", err)
+	}
+	backend := requirePipeline(t, spec, "pipeline_backend_module")
+
+	if len(backend.Signature.Throws) == 0 {
+		t.Fatalf("pipeline_backend_module should declare throws for recoverable module bugs")
+	}
+
+	foundThrow := false
+	for _, thrown := range backend.Signature.Throws {
+		if thrown.Result == "kbug" && hasBag(thrown.Bags, "failure_report") {
+			foundThrow = true
+			break
+		}
+	}
+	if !foundThrow {
+		t.Fatalf("throws = %+v, want kbug with failure_report", backend.Signature.Throws)
+	}
+
+	if len(backend.Signature.ExportedHandlers) == 0 {
+		t.Fatalf("pipeline_backend_module should export debug handler capability")
+	}
+
+	foundExport := false
+	for _, exported := range backend.Signature.ExportedHandlers {
+		if exported.Name == "debug_code" && containsString(exported.Handles, "kbug") {
+			foundExport = true
+			break
+		}
+	}
+	if !foundExport {
+		t.Fatalf("exported handlers = %+v, want debug_code handles kbug", backend.Signature.ExportedHandlers)
+	}
+
+	debug := requireTransition(t, backend, "coder_debug_code")
+	if debug.Kind != "task" {
+		t.Fatalf("coder_debug_code.kind = %q, want task", debug.Kind)
+	}
+	if debug.Limits.MaxAttempts <= 0 {
+		t.Fatalf("coder_debug_code.limits.max_attempts = %d, want > 0", debug.Limits.MaxAttempts)
+	}
+}
+
+func TestFrontModulePreviewHotUpdateIsProgrammerJudged(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
+	spec, err := LoadRegistrySpec(path)
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec() error = %v", err)
+	}
+	front := requirePipeline(t, spec, "pipeline_front_module")
+
+	review := requireTransition(t, front, "user_preview_review")
+	if review.Kind != "task" {
+		t.Fatalf("user_preview_review = %+v, want task", review)
+	}
+	if review.Agent == nil || review.Agent.Role != core.AgentRoleCEO {
+		t.Fatalf("user_preview_review agent = %+v, want ceo/user-facing session role", review.Agent)
+	}
+
+	hotUpdate := requireTransition(t, front, "front_hot_update")
+	if hotUpdate.Kind != "task" {
+		t.Fatalf("front_hot_update = %+v, want task", hotUpdate)
+	}
+	if hotUpdate.Agent == nil || hotUpdate.Agent.Role != "front" {
+		t.Fatalf("front_hot_update agent = %+v, want front programmer", hotUpdate.Agent)
+	}
+	if hotUpdate.Limits.MaxAttempts <= 0 {
+		t.Fatalf("front_hot_update limits = %+v, want max_attempts", hotUpdate.Limits)
+	}
+
+	feedbackState := requireState(t, front, "preview_reviewed")
+	if feedbackState.Next == nil || feedbackState.Next.Type != "by_result" {
+		t.Fatalf("preview_reviewed next = %+v, want by_result", feedbackState.Next)
+	}
+	if _, ok := feedbackState.Next.Cases[string(core.TaskResultCodeRewrite)]; !ok {
+		t.Fatalf("preview_reviewed cases = %+v, want krewrite", feedbackState.Next.Cases)
+	}
+	if _, ok := feedbackState.Next.Cases[string(core.TaskResultCodeBug)]; !ok {
+		t.Fatalf("preview_reviewed cases = %+v, want kbug", feedbackState.Next.Cases)
+	}
+}
+
+func TestGlobalTestUsesArchitectTriageInsteadOfGlobalDebugCode(t *testing.T) {
+	path := filepath.Join("..", "..", "docs", "pipeline_full_delivery.spec.json")
+	spec, err := LoadRegistrySpec(path)
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec() error = %v", err)
+	}
+	global := requirePipeline(t, spec, "pipeline_global_test_code")
+
+	triage := requireTransition(t, global, "architect_triage_global_test_failure")
+	if triage.Kind != "task" {
+		t.Fatalf("architect_triage_global_test_failure = %+v, want task", triage)
+	}
+	if triage.Agent == nil || triage.Agent.Role != core.AgentRoleArchitect {
+		t.Fatalf("triage agent = %+v, want architect", triage.Agent)
+	}
+	if triage.Limits.MaxAttempts <= 0 {
+		t.Fatalf("triage limits = %+v, want max_attempts", triage.Limits)
+	}
+	for _, transition := range global.Transitions {
+		if transition.ID == "global_debug_code" || transition.ID == "debug_global_code" {
+			t.Fatalf("global debug transition should not be used; use architect_triage_global_test_failure")
+		}
 	}
 }
 
