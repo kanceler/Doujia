@@ -62,7 +62,10 @@ func SplitModuleSpec() core.OpSpec {
 		},
 		ExpectedOutputsResolver: resolveSplitModuleOutputs,
 		OutputBags: []core.OutputBagSpec{
-			{Name: "module_input", Required: true, Collection: true, Members: []core.BagMemberRequirement{
+			{Name: "front_module_input", Required: true, Members: []core.BagMemberRequirement{
+				{LogicalKey: core.LKContainerContext, Required: true},
+			}},
+			{Name: "backend_module_input", Required: true, Collection: true, Members: []core.BagMemberRequirement{
 				{LogicalKey: core.LKContainerContext, Required: true},
 			}},
 			{Name: "global_test_input", Required: true, Members: []core.BagMemberRequirement{
@@ -86,8 +89,12 @@ func SplitModuleSpec() core.OpSpec {
 						core.ModuleSeedTestsKey(moduleID),
 					)...,
 				)
+				bagName := "backend_module_input"
+				if moduleID == "module01" {
+					bagName = "front_module_input"
+				}
 				bags = append(bags, appcore.ProducedBagManifest{
-					Name:    "module_input",
+					Name:    bagName,
 					Indexes: map[string]string{"module_key": moduleID},
 					Members: members,
 				})

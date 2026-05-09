@@ -97,6 +97,113 @@ The code runs in one repository and supports local development plus container ex
 	}
 }
 
+func TestPMAgentReviewPlanResolvesProjectArtifactURIInputs(t *testing.T) {
+	t.Parallel()
+
+	runRoot := t.TempDir()
+	artifactDir := filepath.Join(runRoot, "agents", "architect01", "artifacts", "architect_write_architecture")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	architecturePath := filepath.Join(artifactDir, "architecture_v1.md")
+	environmentPath := filepath.Join(artifactDir, "environment_spec.json")
+	if err := os.WriteFile(architecturePath, []byte(`# Architecture Plan
+
+## Project Positioning
+This project turns a PM plan into a deliverable web application with clear page and module boundaries.
+
+## Technology Direction
+Use Node for the backend runtime and keep the implementation lightweight.
+`), 0o644); err != nil {
+		t.Fatalf("write architecture plan: %v", err)
+	}
+	if err := os.WriteFile(environmentPath, []byte(`{
+  "runtime": "node",
+  "image": "node:20-bookworm",
+  "package_manager": "npm",
+  "system_packages": ["git", "curl", "ca-certificates"],
+  "check_commands": ["node --version", "npm --version", "git --version"],
+  "repo_init_files": {"README.md": "# Project\n"},
+  "setup_commands": [],
+  "default_test_command": "npm test"
+}`), 0o644); err != nil {
+		t.Fatalf("write environment spec: %v", err)
+	}
+
+	agent := NewAgent()
+	result, err := agent.Run(context.Background(), core.AgentRunRequest{
+		Task: core.Task{Role: "pm", Op: "review_plan", ExecutionMode: "normal"},
+		Bundle: core.AgentInputBundle{
+			OutputDir: filepath.Join(runRoot, "agents", "pm01", "artifacts", "pm_review_architecture"),
+			Inputs: []core.InputArtifact{
+				{LogicalKey: core.LKArchitecturePlan, Path: "projects/run_test/agents/architect01/artifacts/architect_write_architecture/architecture_v1.md"},
+				{LogicalKey: core.LKEnvironmentSpec, Path: "projects/run_test/agents/architect01/artifacts/architect_write_architecture/environment_spec.json"},
+			},
+		},
+		OpSpec: pmspec.ReviewPlanSpec(),
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Result != "kok" {
+		t.Fatalf("Run() result = %q, want kok; errors=%+v", result.Result, result.Errors)
+	}
+}
+
+func TestPMAgentReviewPlanAcceptsRealSmokeEnvironmentSpecShape(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	architecturePath := filepath.Join(dir, "architecture_v1.md")
+	environmentPath := filepath.Join(dir, "environment_spec.json")
+	if err := os.WriteFile(architecturePath, []byte(`# Snake Game Architecture
+
+## Positioning
+Single page HTML5 Canvas game with keyboard control, score state, collision handling, and restart behavior.
+
+## Modules
+Input handling, game state, rendering, and lifecycle management are separated to keep the implementation simple.
+`), 0o644); err != nil {
+		t.Fatalf("write architecture plan: %v", err)
+	}
+	if err := os.WriteFile(environmentPath, []byte(`{
+  "runtime": "node",
+  "image": "node:20-bookworm",
+  "package_manager": "npm",
+  "system_packages": ["git", "curl", "ca-certificates"],
+  "check_commands": ["node --version", "npm --version", "git --version"],
+  "repo_init_files": {"README.md": "# Snake\n"},
+  "setup_commands": [],
+  "default_test_command": "npm test",
+  "path_policy": {
+    "frontend_roots": ["src/**", "public/**", "index.html", "style.css", "game.js"],
+    "backend_roots": [],
+    "packaging_roots": ["build/**", "package/**"]
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("write environment spec: %v", err)
+	}
+
+	agent := NewAgent()
+	result, err := agent.Run(context.Background(), core.AgentRunRequest{
+		Task: core.Task{Role: "pm", Op: "review_plan", ExecutionMode: "normal"},
+		Bundle: core.AgentInputBundle{
+			OutputDir: dir,
+			Inputs: []core.InputArtifact{
+				{LogicalKey: core.LKArchitecturePlan, Path: architecturePath},
+				{LogicalKey: core.LKEnvironmentSpec, Path: environmentPath},
+			},
+		},
+		OpSpec: pmspec.ReviewPlanSpec(),
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Result != "kok" {
+		t.Fatalf("Run() result = %q, want kok; errors=%+v", result.Result, result.Errors)
+	}
+}
+
 func TestPMAgentReviewPlanWritesFailureReportOnFail(t *testing.T) {
 	t.Parallel()
 
@@ -121,7 +228,7 @@ func TestPMAgentReviewPlanWritesFailureReportOnFail(t *testing.T) {
 
 	agent := NewAgent()
 	result, err := agent.Run(context.Background(), core.AgentRunRequest{
-		Task: core.Task{Role: "pm", Op: "review_plan", ExecutionMode: "normal"},
+		Task:   core.Task{Role: "pm", Op: "review_plan", ExecutionMode: "normal"},
 		Bundle: bundle,
 		OpSpec: pmspec.ReviewPlanSpec(),
 		Handlers: reviewTestHandlerRegistry{

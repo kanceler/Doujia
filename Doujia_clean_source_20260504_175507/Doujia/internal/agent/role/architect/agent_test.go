@@ -406,13 +406,22 @@ func TestArchitectSplitModuleRepairsSemanticPlanOnce(t *testing.T) {
 	if result.Result != "kok" {
 		t.Fatalf("Run() result = %q, want kok", result.Result)
 	}
-	if len(result.Control) != 4 {
-		t.Fatalf("Run() controls len = %d, want 4", len(result.Control))
+	if len(result.Control) != 3 {
+		t.Fatalf("Run() controls len = %d, want 3", len(result.Control))
 	}
-	if got := result.Control[0].InputBags["module_input"]; got != "module_input" {
-		t.Fatalf("first module control input bag = %q, want module_input", got)
+	if result.Control[0].TransitionID != "run_front_module" {
+		t.Fatalf("first control transition = %q, want run_front_module", result.Control[0].TransitionID)
 	}
-	if got := result.Control[3].InputBags["global_test_input"]; got != "global_test_input" {
+	if got := result.Control[0].InputBags["module_input"]; got != "front_module_input" {
+		t.Fatalf("front module control input bag = %q, want front_module_input", got)
+	}
+	if result.Control[1].TransitionID != "run_backend_module_group" {
+		t.Fatalf("second control transition = %q, want run_backend_module_group", result.Control[1].TransitionID)
+	}
+	if got := result.Control[1].InputBags["module_input"]; got != "backend_module_input" {
+		t.Fatalf("backend group control input bag = %q, want backend_module_input", got)
+	}
+	if got := result.Control[2].InputBags["global_test_input"]; got != "global_test_input" {
 		t.Fatalf("global control input bag = %q, want global_test_input", got)
 	}
 	if llmClient.calls != 2 {
@@ -938,6 +947,75 @@ func TestArchitectMergeCodeReadsIndexedGenericModuleBags(t *testing.T) {
 	}
 	if result.Result != "kok" {
 		t.Fatalf("Run() result = %q, want kok", result.Result)
+	}
+	if !cherryPickCalled {
+		t.Fatal("Run() did not call cherry-pick")
+	}
+}
+
+func TestArchitectMergeCodeReadsFullDeliveryFrontBackendAliasBags(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	containerPath := filepath.Join(outputDir, "container_context.json")
+	moduleSpecsPath := filepath.Join(outputDir, "module_specs.json")
+	frontBranchPath := filepath.Join(outputDir, "front_coder_branch.json")
+	backendBranchPath := filepath.Join(outputDir, "module02_coder_branch.json")
+	frontReportPath := filepath.Join(outputDir, "front_module_test_report.json")
+	backendReportPath := filepath.Join(outputDir, "module02_module_test_report.json")
+
+	files := map[string]string{
+		containerPath:     `{"container_id":"ctr-1","repo_dir":"/workspace/repo","base_branch":"main"}`,
+		moduleSpecsPath:   `{"modules":[{"module_id":"module01","module_name":"frontend","module_role":"frontend"},{"module_id":"module02","module_name":"backend","module_role":"backend"}]}`,
+		frontBranchPath:   `{"module_id":"front","branch":"feature/front","commit":"abc123","result":"kok","base_branch":"main","base_commit":"aaa111","test_passed":true}`,
+		backendBranchPath: `{"module_id":"module02","branch":"feature/module02","commit":"def456","result":"kok","base_branch":"main","base_commit":"aaa111","test_passed":true}`,
+		frontReportPath:   `{"module_id":"front","result":"kok","test_passed":true}`,
+		backendReportPath: `{"module_id":"module02","result":"kok","test_passed":true}`,
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+
+	spec := architectspec.MergeCodeSpec()
+	cherryPickCalled := false
+	result, err := NewAgent().Run(context.Background(), core.AgentRunRequest{
+		Task: core.Task{Role: "architect", Op: "merge_code", ExecutionMode: "normal"},
+		Bundle: core.AgentInputBundle{
+			OutputDir: outputDir,
+			Inputs: []core.InputArtifact{
+				{LogicalKey: core.LKContainerContext, Path: containerPath},
+				{LogicalKey: core.LKModuleSpecs, Path: moduleSpecsPath},
+				{LogicalKey: core.LKCoderBranch, Path: frontBranchPath, ArtifactVersionID: "av_front_branch"},
+				{LogicalKey: core.LKCoderBranch, Path: backendBranchPath, ArtifactVersionID: "av_backend_branch"},
+				{LogicalKey: core.LKModuleTestReport, Path: frontReportPath, ArtifactVersionID: "av_front_report"},
+				{LogicalKey: core.LKModuleTestReport, Path: backendReportPath, ArtifactVersionID: "av_backend_report"},
+			},
+			Bags: []core.AgentInputBag{
+				{Name: "front_code_bag", Indexes: map[string]string{"module_key": "front"}, ArtifactVersionIDs: []string{"av_front_branch"}},
+				{Name: "backend_code_bag", Indexes: map[string]string{"module_key": "module02"}, ArtifactVersionIDs: []string{"av_backend_branch"}},
+				{Name: "front_tested_module", Indexes: map[string]string{"module_key": "front"}, ArtifactVersionIDs: []string{"av_front_report"}},
+				{Name: "backend_tested_module", Indexes: map[string]string{"module_key": "module02"}, ArtifactVersionIDs: []string{"av_backend_report"}},
+			},
+		},
+		OpSpec: spec,
+		Handlers: mapHandlerRegistry{handlers: map[string]core.Handler{
+			"artifact_write": stubArtifactWriteHandler{outputDir: outputDir, spec: spec},
+			"container_git_cherry_pick": stubHandler{
+				name: "container_git_cherry_pick",
+				handleFunc: func(context.Context, core.HandlerRequest) (core.HandlerResponse, error) {
+					cherryPickCalled = true
+					return core.HandlerResponse{Data: map[string]any{"result": "ok", "merged_commit": "merged123"}}, nil
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Result != "kok" {
+		t.Fatalf("Run() result = %q, want kok; errors=%+v", result.Result, result.Errors)
 	}
 	if !cherryPickCalled {
 		t.Fatal("Run() did not call cherry-pick")

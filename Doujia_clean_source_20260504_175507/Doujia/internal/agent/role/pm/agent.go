@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -167,16 +168,68 @@ func readBundleArtifactPath(bundle core.AgentInputBundle, logicalKey string) (st
 	for i := len(bundle.Inputs) - 1; i >= 0; i-- {
 		input := bundle.Inputs[i]
 		if input.LogicalKey == logicalKey && input.Path != "" {
-			return input.Path, nil
+			return resolveBundleArtifactPath(bundle, input.Path), nil
 		}
 	}
 	for i := len(bundle.PreviousOutputs) - 1; i >= 0; i-- {
 		previous := bundle.PreviousOutputs[i]
 		if previous.LogicalKey == logicalKey && previous.Path != "" {
-			return previous.Path, nil
+			return resolveBundleArtifactPath(bundle, previous.Path), nil
 		}
 	}
 	return "", fmt.Errorf("missing artifact %q", logicalKey)
+}
+
+func resolveBundleArtifactPath(bundle core.AgentInputBundle, rawPath string) string {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" || filepath.IsAbs(rawPath) {
+		return filepath.Clean(rawPath)
+	}
+	candidates := []string{rawPath}
+	if bundle.InputDir != "" {
+		candidates = append(candidates, filepath.Join(bundle.InputDir, filepath.FromSlash(rawPath)))
+	}
+	if runRoot := runRootFromBundle(bundle); runRoot != "" {
+		candidates = append(candidates, filepath.Join(runRoot, filepath.FromSlash(projectArtifactPath(rawPath))))
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return filepath.Clean(candidate)
+		}
+	}
+	return filepath.Clean(rawPath)
+}
+
+func runRootFromBundle(bundle core.AgentInputBundle) string {
+	for _, dir := range []string{bundle.InputDir, bundle.OutputDir} {
+		if root := runRootFromAgentDir(dir); root != "" {
+			return root
+		}
+	}
+	return ""
+}
+
+func runRootFromAgentDir(dir string) string {
+	dir = filepath.Clean(strings.TrimSpace(dir))
+	if dir == "." || dir == "" {
+		return ""
+	}
+	parts := strings.Split(filepath.ToSlash(dir), "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] == "agents" && i > 0 {
+			return filepath.FromSlash(strings.Join(parts[:i], "/"))
+		}
+	}
+	return ""
+}
+
+func projectArtifactPath(rawPath string) string {
+	normalized := filepath.ToSlash(strings.TrimSpace(rawPath))
+	parts := strings.Split(normalized, "/")
+	if len(parts) >= 3 && parts[0] == "projects" && parts[1] != "" {
+		return strings.Join(parts[2:], "/")
+	}
+	return normalized
 }
 
 func stringValue(value any) string {

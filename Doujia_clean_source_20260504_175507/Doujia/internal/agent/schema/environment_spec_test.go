@@ -79,6 +79,7 @@ func TestEnvironmentSpecPromptContractIncludesRequiredFields(t *testing.T) {
 		"frontend_roots",
 		"backend_roots",
 		"packaging_roots",
+		"Do not use file wildcard entries",
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("EnvironmentSpecPromptContract() missing %q in:\n%s", want, text)

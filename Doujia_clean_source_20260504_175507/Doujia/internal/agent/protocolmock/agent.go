@@ -88,6 +88,10 @@ func (a *Agent) execute(ctx context.Context, task core.TaskMetaData) (core.TaskM
 			return a.writeSingleOutput(ctx, task, "global_test_report", artifactPath(a.runID, a.agentID, "test", "global_test_report_v1.md"), "protocolmock global test report")
 		}
 		return a.writeSingleOutput(ctx, task, "tested_module", artifactPath(a.runID, a.agentID, "test", string(a.agentID)+"_test_code_v1.md"), "protocolmock tested module")
+	case "preview_edit":
+		return a.writeSingleOutput(ctx, task, "preview_edit_bag", artifactPath(a.runID, a.agentID, "preview_edit", "preview_edit.json"), `{"kind":"front_preview_edit","approved":true}`+"\n")
+	case "user_preview_confirm":
+		return a.feedback(task, core.TaskResultCodeOK, append([]string(nil), task.ArtifactURIs...)), nil
 	case "debug_global_code":
 		return a.writeSingleOutput(ctx, task, "global_test_code_input", artifactPath(a.runID, a.agentID, "debug", "global_test_code_input_v2.md"), "protocolmock debug code")
 	case core.TaskOpDebug, "debug_write_code":
@@ -100,34 +104,34 @@ func (a *Agent) execute(ctx context.Context, task core.TaskMetaData) (core.TaskM
 }
 
 func (a *Agent) splitModule(ctx context.Context, task core.TaskMetaData) (core.TaskMetaData, error) {
-	module01Ref := artifactPath(a.runID, a.agentID, "modules", "module01_input.md")
-	module02Ref := artifactPath(a.runID, a.agentID, "modules", "module02_input.md")
+	frontRef := artifactPath(a.runID, a.agentID, "modules", "front_module_input.md")
+	backendRef := artifactPath(a.runID, a.agentID, "modules", "backend_module_input.md")
 	globalRef := artifactPath(a.runID, a.agentID, "test_data", "global_test_input.md")
-	if err := a.artifactStore.Write(ctx, module01Ref, []byte("protocolmock module01 input")); err != nil {
+	if err := a.artifactStore.Write(ctx, frontRef, []byte("protocolmock front module input")); err != nil {
 		return core.TaskMetaData{}, err
 	}
-	if err := a.artifactStore.Write(ctx, module02Ref, []byte("protocolmock module02 input")); err != nil {
+	if err := a.artifactStore.Write(ctx, backendRef, []byte("protocolmock backend module input")); err != nil {
 		return core.TaskMetaData{}, err
 	}
 	if err := a.artifactStore.Write(ctx, globalRef, []byte("protocolmock global test input")); err != nil {
 		return core.TaskMetaData{}, err
 	}
-	feedback := a.feedback(task, core.TaskResultCodeOK, []string{module01Ref, module02Ref, globalRef})
+	feedback := a.feedback(task, core.TaskResultCodeOK, []string{frontRef, backendRef, globalRef})
 	feedback.Outputs = []core.AgentOutput{
-		producedOutput(agentcore.ModuleSpecKey("module01"), "markdown", module01Ref),
-		producedOutput(agentcore.ModuleSpecKey("module02"), "markdown", module02Ref),
+		producedOutput(agentcore.ModuleSpecKey("module01"), "markdown", frontRef),
+		producedOutput(agentcore.ModuleSpecKey("module02"), "markdown", backendRef),
 		producedOutput(agentcore.LKModuleSpecs, "markdown", globalRef),
 	}
 	feedback.ProducedBags = []core.ProducedBagManifest{
 		{
-			Name:    "module_input",
-			Indexes: map[string]string{"module_key": "module01"},
+			Name:    "front_module_input",
+			Indexes: map[string]string{"module_key": "front"},
 			Members: []core.ProducedBagMember{
 				{LogicalKey: agentcore.ModuleSpecKey("module01")},
 			},
 		},
 		{
-			Name:    "module_input",
+			Name:    "backend_module_input",
 			Indexes: map[string]string{"module_key": "module02"},
 			Members: []core.ProducedBagMember{
 				{LogicalKey: agentcore.ModuleSpecKey("module02")},
@@ -141,32 +145,38 @@ func (a *Agent) splitModule(ctx context.Context, task core.TaskMetaData) (core.T
 		},
 	}
 	feedback.Control = []core.Control{
-		startModuleControl("module01", "coder01", "tester01"),
-		startModuleControl("module02", "coder02", "tester02"),
 		{
 			Type:         core.ControlTypeStartPipeline,
-			TransitionID: "write_global_test_data",
+			TransitionID: "run_front_module",
+			PipelineID:   "pipeline_front_module",
+			InstanceKey:  "module01",
+			Params:       map[string]string{"module_key": "front"},
+			AgentBindings: map[string]core.AgentID{
+				"front":  "front01",
+				"tester": "tester01",
+			},
+			InputBags: map[string]string{"module_input": "front_module_input"},
+		},
+		{
+			Type:         core.ControlTypeStartPipeline,
+			TransitionID: "run_backend_module_group",
+			PipelineID:   "pipeline_backend_module_group",
+			InstanceKey:  "backend",
+			AgentBindings: map[string]core.AgentID{
+				"coder":  "coder01",
+				"tester": "tester01",
+			},
+			InputBags: map[string]string{"module_input": "backend_module_input"},
+		},
+		{
+			Type:         core.ControlTypeStartPipeline,
+			TransitionID: "run_global_test_data",
 			PipelineID:   "pipeline_global_test_data",
 			InstanceKey:  "global",
 			InputBags:    map[string]string{"global_test_input": "global_test_input"},
 		},
 	}
 	return feedback, nil
-}
-
-func startModuleControl(moduleKey string, coder core.AgentID, tester core.AgentID) core.Control {
-	return core.Control{
-		Type:         core.ControlTypeStartPipeline,
-		TransitionID: "test_all_modules",
-		PipelineID:   "pipeline_module",
-		InstanceKey:  moduleKey,
-		Params:       map[string]string{"module_key": moduleKey},
-		AgentBindings: map[string]core.AgentID{
-			"coder":  coder,
-			"tester": tester,
-		},
-		InputBags: map[string]string{"module_input": "module_input"},
-	}
 }
 
 func (a *Agent) writeSingleOutput(ctx context.Context, task core.TaskMetaData, outputKey string, outputRef string, content string) (core.TaskMetaData, error) {
@@ -251,6 +261,8 @@ func logicalKeyForOutputBag(outputKey string) string {
 		return agentcore.LKGlobalTestReport
 	case "global_test_code_input":
 		return agentcore.LKMergedCodeSummary
+	case "preview_edit_bag":
+		return agentcore.LKPreviewEdit
 	default:
 		return outputKey
 	}

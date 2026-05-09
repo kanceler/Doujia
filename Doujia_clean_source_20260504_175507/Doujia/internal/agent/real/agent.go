@@ -436,10 +436,10 @@ func inferLogicalKeyFromURI(uri string) string {
 		return agentcore.LKRequirement
 	case strings.Contains(normalized, "plan"):
 		return agentcore.LKPMPlan
-	case strings.Contains(normalized, "architecture"):
-		return agentcore.LKArchitecturePlan
 	case strings.Contains(normalized, "environment_spec"):
 		return agentcore.LKEnvironmentSpec
+	case strings.Contains(normalized, "architecture"):
+		return agentcore.LKArchitecturePlan
 	case strings.Contains(normalized, "container_context"):
 		return agentcore.LKContainerContext
 	case strings.Contains(normalized, "run_delivery_config"):

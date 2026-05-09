@@ -60,6 +60,7 @@ type ResumeResult struct {
 
 type taskSnapshotRuntimeContext struct {
 	Task             taskRuntimeSnapshot              `json:"task"`
+	InputBags        []core.BagBindingRef             `json:"input_bags,omitempty"`
 	OutputBags       []core.BagBindingRef             `json:"output_bags,omitempty"`
 	PipelineInstance *pipelineInstanceRuntimeSnapshot `json:"pipeline_instance,omitempty"`
 }
@@ -405,6 +406,7 @@ func (s *Service) OnFeedback(ctx context.Context, feedback core.TaskMetaData) er
 		UpdatedAt:         time.Now().UTC(),
 	}
 	previousTasks, _ := s.tasks.ListByRun(ctx, run.ID)
+	previousTasks = appendOrReplaceTaskSnapshot(previousTasks, task)
 	nextTask.InputBags = legacyNextTaskInputBags(nextStage, task, feedback, previousTasks)
 	nextTask.InputBagIDs = legacyNextTaskInputBagIDs(nextStage, task, feedback, nextTask.InputBags)
 	if len(nextStage.DependsOnIDs) > 0 {
@@ -1164,8 +1166,11 @@ func (s *Service) advanceActiveRefMember(ctx context.Context, run core.PipelineR
 	if len(nextStage.DependsOnIDs) > 0 {
 		nextTask.DependsOnIDs = stageIDsToTaskIDs(nextStage.DependsOnIDs)
 	}
-	nextTask.InputBags = bagBindingsFromSnapshotOutput(nextStage, snapshot)
-	nextTask.InputBagIDs = snapshot.OutputBagIDs
+	nextTask.InputBags = s.rootActiveSnapshotNextTaskInputBags(ctx, run, nextStage, snapshot)
+	nextTask.InputBagIDs = bagIDsFromBindings(nextTask.InputBags)
+	if len(nextTask.InputBagIDs) == 0 {
+		nextTask.InputBagIDs = append([]string(nil), snapshot.OutputBagIDs...)
+	}
 	fact := feedbackFactContext{
 		SnapshotID:         snapshot.SnapshotID,
 		SnapshotVersionID:  snapshot.SnapshotVersionID,
@@ -1321,6 +1326,38 @@ func (s *Service) advancePipelineInstanceActiveRefMember(ctx context.Context, ru
 	}, nil
 }
 
+func (s *Service) rootActiveSnapshotNextTaskInputBags(ctx context.Context, run core.PipelineRun, nextStage pipeline.StageSpec, snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
+	out := make([]core.BagBindingRef, 0, len(nextStage.InputBags))
+	if task, err := s.tasks.Get(ctx, run.ID, core.TaskID(snapshot.TaskID)); err == nil {
+		if len(task.OutputBagIDs) == 0 {
+			task.OutputBagIDs = append([]string(nil), snapshot.OutputBagIDs...)
+		}
+		tasks, _ := s.tasks.ListByRun(ctx, run.ID)
+		tasks = appendOrReplaceTaskSnapshot(tasks, task)
+		out = appendUniqueBagBindings(out, legacyNextTaskInputBags(nextStage, task, core.TaskMetaData{
+			Direction:   core.TaskDirectionFeedback,
+			RunID:       run.ID,
+			TaskID:      task.ID,
+			AgentID:     task.AgentID,
+			Op:          task.Op,
+			Result:      snapshot.Result,
+			InputBagIDs: snapshot.InputBagIDs,
+		}, tasks)...)
+	}
+	out = appendUniqueBagBindings(out, bagBindingsFromSnapshotForNextStage(nextStage, snapshot)...)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func bagBindingsFromSnapshotForNextStage(nextStage pipeline.StageSpec, snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
+	if len(snapshot.OutputBagIDs) == 0 {
+		return inputBagBindingsFromSnapshotRuntime(nextStage, snapshot)
+	}
+	return bagBindingsFromSnapshotOutput(nextStage, snapshot)
+}
+
 func bagBindingsFromSnapshotOutput(nextStage pipeline.StageSpec, snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
 	if len(snapshot.OutputBagIDs) == 0 {
 		return nil
@@ -1337,6 +1374,76 @@ func bagBindingsFromSnapshotOutput(nextStage pipeline.StageSpec, snapshot doujia
 		bindings = append(bindings, core.BagBindingRef{Name: name, BagID: bagID})
 	}
 	return bindings
+}
+
+func inputBagBindingsFromSnapshotRuntime(nextStage pipeline.StageSpec, snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
+	if strings.TrimSpace(snapshot.RuntimeContextJSON) == "" || len(nextStage.InputBags) == 0 {
+		return nil
+	}
+	var runtimeContext taskSnapshotRuntimeContext
+	if err := json.Unmarshal([]byte(snapshot.RuntimeContextJSON), &runtimeContext); err != nil {
+		return nil
+	}
+	if len(runtimeContext.InputBags) == 0 {
+		return nil
+	}
+	wanted := make(map[string]pipeline.BagSpec, len(nextStage.InputBags))
+	for _, spec := range nextStage.InputBags {
+		name := strings.TrimSpace(spec.Name)
+		if name != "" {
+			wanted[name] = spec
+		}
+	}
+	out := make([]core.BagBindingRef, 0, len(runtimeContext.InputBags))
+	seen := make(map[string]bool)
+	for _, binding := range runtimeContext.InputBags {
+		name := strings.TrimSpace(binding.Name)
+		bagID := strings.TrimSpace(binding.BagID)
+		spec, ok := wanted[name]
+		if !ok || bagID == "" {
+			continue
+		}
+		key := name + "\x00" + bagID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		binding.Name = name
+		binding.BagID = bagID
+		binding.Indexes = cloneControlStringMap(binding.Indexes)
+		out = append(out, binding)
+		if !spec.Collection {
+			delete(wanted, name)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func appendUniqueBagBindings(out []core.BagBindingRef, items ...core.BagBindingRef) []core.BagBindingRef {
+	seen := make(map[string]bool, len(out)+len(items))
+	for _, binding := range out {
+		seen[binding.Name+"\x00"+binding.BagID] = true
+	}
+	for _, binding := range items {
+		name := strings.TrimSpace(binding.Name)
+		bagID := strings.TrimSpace(binding.BagID)
+		if name == "" || bagID == "" {
+			continue
+		}
+		key := name + "\x00" + bagID
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		binding.Name = name
+		binding.BagID = bagID
+		binding.Indexes = cloneControlStringMap(binding.Indexes)
+		out = append(out, binding)
+	}
+	return out
 }
 
 func outputBagBindingsFromSnapshotRuntime(snapshot doujiagit.TaskSnapshot) []core.BagBindingRef {
@@ -1697,7 +1804,8 @@ func (s *Service) taskSnapshotRuntimeContextJSON(ctx context.Context, task core.
 			AgentID:            task.AgentID,
 			Op:                 task.Op,
 		},
-		OutputBags: inputBagBindingsFromCommit(feedback.Commit, outputBagIDs),
+		InputBags:  inputBagBindingsForSnapshot(task, feedback),
+		OutputBags: outputBagBindingsForSnapshot(task, feedback, outputBagIDs),
 	}
 	if task.PipelineInstanceID != "" && s.instances != nil {
 		instance, err := s.instances.Get(ctx, task.RunID, task.PipelineInstanceID)
@@ -1711,6 +1819,31 @@ func (s *Service) taskSnapshotRuntimeContextJSON(ctx context.Context, task core.
 		return "", err
 	}
 	return string(raw), nil
+}
+
+func inputBagBindingsForSnapshot(task core.Task, feedback core.TaskMetaData) []core.BagBindingRef {
+	if len(feedback.InputBags) > 0 {
+		return append([]core.BagBindingRef(nil), feedback.InputBags...)
+	}
+	if len(task.InputBags) > 0 {
+		return append([]core.BagBindingRef(nil), task.InputBags...)
+	}
+	return nil
+}
+
+func outputBagBindingsForSnapshot(task core.Task, feedback core.TaskMetaData, outputBagIDs []string) []core.BagBindingRef {
+	if bindings := inputBagBindingsFromCommit(feedback.Commit, outputBagIDs); len(bindings) > 0 {
+		return bindings
+	}
+	if shouldForwardInputBags(task, feedback, core.TaskStatusDone) && len(outputBagIDs) == len(task.InputBags) {
+		out := make([]core.BagBindingRef, 0, len(task.InputBags))
+		for i, binding := range task.InputBags {
+			binding.BagID = outputBagIDs[i]
+			out = append(out, binding)
+		}
+		return out
+	}
+	return nil
 }
 
 func (s *Service) applyTaskSnapshotToInstance(ctx context.Context, instance core.PipelineInstance, task core.Task, feedback core.TaskMetaData, outputBagIDs []string) core.PipelineInstance {
@@ -3696,7 +3829,7 @@ func fromControlTransitionsAfterTask(def pipeline.PipelineDefSpec, sourceTask co
 		if !ok {
 			return nil, fmt.Errorf("transition %q not found in pipeline %q", transitionID, def.PipelineID)
 		}
-		if transition.Kind == "call" && transition.Mode == "from_control" {
+		if transition.Kind == "call" {
 			out = append(out, transition)
 		}
 	}
@@ -4350,6 +4483,16 @@ func legacyOutputBagBindingsFromTask(task core.Task) []core.BagBindingRef {
 	return nil
 }
 
+func appendOrReplaceTaskSnapshot(tasks []core.Task, current core.Task) []core.Task {
+	for i := range tasks {
+		if tasks[i].ID == current.ID {
+			tasks[i] = current
+			return tasks
+		}
+	}
+	return append(tasks, current)
+}
+
 func shouldTreatOutputsAsForwardedInputs(task core.Task) bool {
 	if len(task.InputBags) == 0 || len(task.OutputBagIDs) != len(task.InputBags) {
 		return false
@@ -4648,8 +4791,49 @@ func resolveControlInputBagListBindings(parent core.PipelineInstance, transition
 			return nil, fmt.Errorf("transition %q bindings.input_bags.%s: %w", transition.ID, name, err)
 		}
 		out[name] = values
+		if sourceName := controlInputBagSourceName(binding); sourceName != "" {
+			appendIndexedControlInputBagAliases(out, name, sourceName, parent)
+		}
 	}
 	return out, nil
+}
+
+func controlInputBagSourceName(binding any) string {
+	values, ok := binding.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return bagRefFromBindingObject(values)
+}
+
+func appendIndexedControlInputBagAliases(out map[string][]string, targetName string, sourceName string, parent core.PipelineInstance) {
+	targetName = strings.TrimSpace(targetName)
+	sourceName = strings.TrimSpace(sourceName)
+	if targetName == "" || sourceName == "" {
+		return
+	}
+	add := func(key string, values []string) {
+		indexedName, indexes, ok := parseIndexedBagLookupKey(key)
+		if !ok || indexedName != sourceName || len(indexes) == 0 {
+			return
+		}
+		targetKey := indexedBagLookupKey(targetName, indexes)
+		for _, value := range values {
+			out[targetKey] = appendUniqueString(out[targetKey], value)
+		}
+	}
+	for key, values := range parent.OutputBagIDLists {
+		add(key, values)
+	}
+	for key, values := range parent.InputBagIDLists {
+		add(key, values)
+	}
+	for key, value := range parent.OutputBagIDs {
+		add(key, []string{value})
+	}
+	for key, value := range parent.InputBagIDs {
+		add(key, []string{value})
+	}
 }
 
 func resolveControlInputBagBinding(parent core.PipelineInstance, control core.Control, binding any) (string, error) {

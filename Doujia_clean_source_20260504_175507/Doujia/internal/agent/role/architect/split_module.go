@@ -124,25 +124,43 @@ func (a *Agent) runSplitModule(ctx context.Context, req core.AgentRunRequest) (c
 }
 
 func splitModuleControls(modules []splitModule) []appcore.Control {
-	controls := make([]appcore.Control, 0, len(modules)+1)
+	controls := make([]appcore.Control, 0, 3)
+	backendSeen := false
 	for i, module := range modules {
 		moduleID := module.Spec.ModuleID
+		if module.ModuleRole == "frontend" {
+			controls = append(controls, appcore.Control{
+				Type:         appcore.ControlTypeStartPipeline,
+				TransitionID: "run_front_module",
+				PipelineID:   "pipeline_front_module",
+				InstanceKey:  moduleID,
+				Params:       map[string]string{"module_key": moduleID},
+				AgentBindings: map[string]appcore.AgentID{
+					"front":  appcore.AgentID("front01"),
+					"tester": appcore.AgentID(fmt.Sprintf("tester%02d", i+1)),
+				},
+				InputBags: map[string]string{"module_input": "front_module_input"},
+			})
+			continue
+		}
+		backendSeen = true
+	}
+	if backendSeen {
 		controls = append(controls, appcore.Control{
 			Type:         appcore.ControlTypeStartPipeline,
-			TransitionID: "test_all_modules",
-			PipelineID:   "pipeline_module",
-			InstanceKey:  moduleID,
-			Params:       map[string]string{"module_key": moduleID},
+			TransitionID: "run_backend_module_group",
+			PipelineID:   "pipeline_backend_module_group",
+			InstanceKey:  "backend",
 			AgentBindings: map[string]appcore.AgentID{
-				"coder":  appcore.AgentID(fmt.Sprintf("coder%02d", i+1)),
-				"tester": appcore.AgentID(fmt.Sprintf("tester%02d", i+1)),
+				"coder":  "coder01",
+				"tester": "tester01",
 			},
-			InputBags: map[string]string{"module_input": "module_input"},
+			InputBags: map[string]string{"module_input": "backend_module_input"},
 		})
 	}
 	controls = append(controls, appcore.Control{
 		Type:         appcore.ControlTypeStartPipeline,
-		TransitionID: "write_global_test_data",
+		TransitionID: "run_global_test_data",
 		PipelineID:   "pipeline_global_test_data",
 		InstanceKey:  "global",
 		InputBags:    map[string]string{"global_test_input": "global_test_input"},

@@ -374,6 +374,7 @@ type mergeModuleSpecs struct {
 type mergeModuleSpec struct {
 	ModuleID   string `json:"module_id"`
 	ModuleName string `json:"module_name"`
+	ModuleRole string `json:"module_role"`
 }
 
 type mergeCoderBranch struct {
@@ -425,7 +426,8 @@ func (a *Agent) runMergeCode(ctx context.Context, req core.AgentRunRequest) (cor
 		if moduleID == "" {
 			return a.buildMergeUpstreamIssue(ctx, req, core.LKModuleSpecs, "module_specs.json contains a module with empty module_id.", "architect.merge_code cannot map per-module merge inputs without module_id.")
 		}
-		branch, err := readMergeModuleInput[mergeCoderBranch](req.Bundle, moduleID, "code_bag", core.LKCoderBranch, core.ModuleCoderBranchKey(moduleID))
+		moduleLookupKeys := mergeModuleLookupKeys(module)
+		branch, err := readMergeModuleInput[mergeCoderBranch](req.Bundle, moduleLookupKeys, []string{"code_bag", "front_code_bag", "backend_code_bag"}, core.LKCoderBranch, core.ModuleCoderBranchKey(moduleID))
 		if err != nil {
 			return a.buildMergeUpstreamIssue(ctx, req, core.ModuleCoderBranchKey(moduleID), core.ModuleCoderBranchKey(moduleID)+".json is unreadable or invalid JSON: "+err.Error(), "architect.merge_code cannot continue without a valid coder_branch artifact.")
 		}
@@ -447,7 +449,7 @@ func (a *Agent) runMergeCode(ctx context.Context, req core.AgentRunRequest) (cor
 		if branch.TestPassed == nil {
 			return a.buildMergeUpstreamIssue(ctx, req, core.ModuleCoderBranchKey(moduleID), core.ModuleCoderBranchKey(moduleID)+".json is missing required field test_passed.", "architect.merge_code cannot continue without coder_branch.test_passed.")
 		}
-		report, err := readMergeModuleInput[mergeModuleReport](req.Bundle, moduleID, "tested_module", core.LKModuleTestReport, core.ModuleTestReportKey(moduleID))
+		report, err := readMergeModuleInput[mergeModuleReport](req.Bundle, moduleLookupKeys, []string{"tested_module", "front_tested_module", "backend_tested_module"}, core.LKModuleTestReport, core.ModuleTestReportKey(moduleID))
 		if err != nil {
 			return a.buildMergeUpstreamIssue(ctx, req, core.ModuleTestReportKey(moduleID), core.ModuleTestReportKey(moduleID)+".json is unreadable or invalid JSON: "+err.Error(), "architect.merge_code cannot continue without a valid module_test_report artifact.")
 		}
@@ -608,11 +610,23 @@ func readMergeInput[T any](bundle core.AgentInputBundle, logicalKey string) (T, 
 	return out, fmt.Errorf("missing merge input %q", logicalKey)
 }
 
-func readMergeModuleInput[T any](bundle core.AgentInputBundle, moduleID string, bagName string, genericLogicalKey string, moduleLogicalKey string) (T, error) {
+func mergeModuleLookupKeys(module mergeModuleSpec) []string {
+	moduleID := strings.TrimSpace(module.ModuleID)
+	out := []string{}
+	if moduleID != "" {
+		out = append(out, moduleID)
+	}
+	if strings.TrimSpace(module.ModuleRole) == "frontend" && moduleID != "front" {
+		out = append(out, "front")
+	}
+	return out
+}
+
+func readMergeModuleInput[T any](bundle core.AgentInputBundle, moduleKeys []string, bagNames []string, genericLogicalKey string, moduleLogicalKey string) (T, error) {
 	if hasMergeInput(bundle, moduleLogicalKey) {
 		return readMergeInput[T](bundle, moduleLogicalKey)
 	}
-	versionIDs := indexedBagVersionIDs(bundle, bagName, moduleID)
+	versionIDs := indexedBagVersionIDs(bundle, bagNames, moduleKeys)
 	var out T
 	if len(versionIDs) == 0 {
 		return out, fmt.Errorf("missing merge input %q", moduleLogicalKey)
@@ -635,10 +649,22 @@ func hasMergeInput(bundle core.AgentInputBundle, logicalKey string) bool {
 	return false
 }
 
-func indexedBagVersionIDs(bundle core.AgentInputBundle, bagName string, moduleID string) map[string]bool {
+func indexedBagVersionIDs(bundle core.AgentInputBundle, bagNames []string, moduleKeys []string) map[string]bool {
+	wanted := make(map[string]bool, len(bagNames))
+	for _, bagName := range bagNames {
+		if name := strings.TrimSpace(bagName); name != "" {
+			wanted[name] = true
+		}
+	}
+	wantedModules := make(map[string]bool, len(moduleKeys))
+	for _, moduleKey := range moduleKeys {
+		if key := strings.TrimSpace(moduleKey); key != "" {
+			wantedModules[key] = true
+		}
+	}
 	out := make(map[string]bool)
 	for _, bag := range bundle.Bags {
-		if bag.Name != bagName || bag.Indexes["module_key"] != moduleID {
+		if !wanted[bag.Name] || !wantedModules[bag.Indexes["module_key"]] {
 			continue
 		}
 		for _, versionID := range bag.ArtifactVersionIDs {

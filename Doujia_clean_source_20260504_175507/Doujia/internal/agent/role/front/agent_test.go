@@ -86,6 +86,88 @@ func TestAgentRejectsUnsupportedOp(t *testing.T) {
 	}
 }
 
+func TestAgentRunsPreviewEditByWritingPreviewArtifact(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	agent := NewAgent()
+	result, err := agent.Run(context.Background(), core.AgentRunRequest{
+		Task:   core.Task{Role: "front", Op: "preview_edit", ExecutionMode: "normal"},
+		Bundle: core.AgentInputBundle{OutputDir: outputDir},
+		OpSpec: core.OpSpec{
+			Role: "front",
+			Op:   "preview_edit",
+			ExpectedOutputs: []core.OutputSpec{{
+				LogicalKey: "preview_edit",
+				ObjectType: "json",
+				FileName:   "preview_edit.json",
+				Required:   true,
+			}},
+		},
+		Handlers: stubHandlerRegistry{handlers: map[string]core.Handler{
+			"artifact_write": stubHandler{
+				handleFunc: func(_ context.Context, req core.HandlerRequest) (core.HandlerResponse, error) {
+					logicalKey, _ := req.Args["logical_key"].(string)
+					content, _ := req.Args["content"].(string)
+					output, ok := req.OpSpec.FindOutput(logicalKey)
+					if !ok {
+						return core.HandlerResponse{}, fmt.Errorf("unknown output %q", logicalKey)
+					}
+					path := filepath.Join(req.Bundle.OutputDir, output.FileName)
+					if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+						return core.HandlerResponse{}, err
+					}
+					return core.HandlerResponse{Data: map[string]any{
+						"object_type":  output.ObjectType,
+						"content_type": "application/json; charset=utf-8",
+						"encoding":     "utf-8",
+						"status":       "produced",
+						"path":         path,
+						"artifact_uri": "projects/run/agents/front01/artifacts/preview_edit/preview_edit.json",
+					}}, nil
+				},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Result != "kok" {
+		t.Fatalf("Run() result = %q, want kok; errors=%+v", result.Result, result.Errors)
+	}
+	if len(result.Outputs) != 1 || result.Outputs[0].LogicalKey != "preview_edit" {
+		t.Fatalf("Run() outputs = %+v, want preview_edit artifact", result.Outputs)
+	}
+	body, readErr := os.ReadFile(filepath.Join(outputDir, "preview_edit.json"))
+	if readErr != nil {
+		t.Fatalf("ReadFile() error = %v", readErr)
+	}
+	if len(body) == 0 {
+		t.Fatal("preview_edit.json is empty")
+	}
+}
+
+func TestAgentRunsUserPreviewConfirmAsAutoApproval(t *testing.T) {
+	t.Parallel()
+
+	result, err := NewAgent().Run(context.Background(), core.AgentRunRequest{
+		Task: core.Task{Role: "front", Op: "user_preview_confirm", ExecutionMode: "normal"},
+		OpSpec: core.OpSpec{
+			Role: "front",
+			Op:   "user_preview_confirm",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if result.Result != "kok" {
+		t.Fatalf("Run() result = %q, want kok; errors=%+v", result.Result, result.Errors)
+	}
+	if len(result.Outputs) != 0 || len(result.ProducedBags) != 0 {
+		t.Fatalf("Run() outputs=%+v produced_bags=%+v, want no artifacts for auto approval", result.Outputs, result.ProducedBags)
+	}
+}
+
 func TestAgentFailsWhenPrepareHandlerMissing(t *testing.T) {
 	t.Parallel()
 

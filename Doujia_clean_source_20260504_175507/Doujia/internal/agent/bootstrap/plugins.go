@@ -91,6 +91,10 @@ func (BuiltinResolver) ResolveOp(implRef string) (agentcore.OpSpec, error) {
 		return frontspec.WriteCodeSpec(), nil
 	case "builtin:front.debug_write_code":
 		return frontspec.DebugWriteCodeSpec(), nil
+	case "builtin:front.preview_edit":
+		return frontspec.PreviewEditSpec(), nil
+	case "builtin:front.user_preview_confirm":
+		return frontspec.UserPreviewConfirmSpec(), nil
 	case "builtin:pm.write_plan":
 		return pmspec.WritePlanSpec(), nil
 	case "builtin:pm.review_plan":

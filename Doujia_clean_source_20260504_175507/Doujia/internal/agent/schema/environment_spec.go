@@ -275,6 +275,7 @@ func EnvironmentSpecPromptContract() string {
     - "backend_roots": 字符串数组，后端可拥有的仓库相对路径；例如 "server/**"、"api/**"、"data/**"
     - "packaging_roots": 字符串数组，前端交付/桌面壳/打包配置可拥有的仓库相对路径；例如 "electron/**"、"package/**"、"build/**"
 - path_policy 中的路径必须是仓库内相对路径，不能是绝对路径，不能逃逸到上级目录，不能写入 .git/；目录范围必须写成以 "/**" 结尾的 glob。
+- Do not use file wildcard entries such as "*.css", "*.js", or "*.html"; list concrete root files like "style.css" and "game.js" instead, and only use "/**" for directory ranges.
 - 请根据 architecture_v1.md 的实际项目结构选择 path_policy，不要把所有示例路径都机械照抄。
 - 不要输出注释，不要输出 Markdown 代码块，只输出 JSON 文本。
 

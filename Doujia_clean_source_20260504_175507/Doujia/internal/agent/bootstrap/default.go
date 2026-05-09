@@ -126,6 +126,8 @@ func builtinOpRegistrations() []agentcore.OpRegistration {
 		{id: "coder.debug_write_code", spec: coderspec.DebugWriteCodeSpec()},
 		{id: "front.write_code", spec: frontspec.WriteCodeSpec()},
 		{id: "front.debug_write_code", spec: frontspec.DebugWriteCodeSpec()},
+		{id: "front.preview_edit", spec: frontspec.PreviewEditSpec()},
+		{id: "front.user_preview_confirm", spec: frontspec.UserPreviewConfirmSpec()},
 		{id: "pm.write_plan", spec: pmspec.WritePlanSpec()},
 		{id: "pm.review_plan", spec: pmspec.ReviewPlanSpec()},
 		{id: "tester.test_data", spec: testerspec.TestDataSpec()},

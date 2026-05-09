@@ -16,12 +16,25 @@ func MergeCodeSpec() core.OpSpec {
 			{Name: "container_context", Required: true, Members: []core.BagMemberRequirement{
 				{LogicalKey: core.LKContainerContext, Required: true},
 			}},
-			{Name: "tested_module", Required: true, Collection: true, Members: []core.BagMemberRequirement{
+			{Name: "front_tested_module", Required: true, Members: []core.BagMemberRequirement{
 				{LogicalKey: core.LKModuleTestReport, Required: true},
 			}},
-			{Name: "code_bag", Required: true, Collection: true, Members: []core.BagMemberRequirement{
+			{Name: "backend_tested_module", Required: true, Collection: true, Members: []core.BagMemberRequirement{
+				{LogicalKey: core.LKModuleTestReport, Required: true},
+			}},
+			{Name: "front_code_bag", Required: true, Members: []core.BagMemberRequirement{
 				{LogicalKey: core.LKCoderBranch, Required: true},
 			}},
+			{Name: "backend_code_bag", Required: true, Collection: true, Members: []core.BagMemberRequirement{
+				{LogicalKey: core.LKCoderBranch, Required: true},
+			}},
+			{Name: "tested_module", Collection: true, Members: []core.BagMemberRequirement{
+				{LogicalKey: core.LKModuleTestReport, Required: true},
+			}},
+			{Name: "code_bag", Collection: true, Members: []core.BagMemberRequirement{
+				{LogicalKey: core.LKCoderBranch, Required: true},
+			}},
+			{Name: "global_test_input"},
 		},
 		BaseRequiredInputs: []core.InputRequirement{
 			{LogicalKey: core.LKContainerContext, Description: "Container execution context including container_id, repo_dir, and base_branch."},

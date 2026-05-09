@@ -510,6 +510,71 @@ func TestFullDeliveryJSONDispatchesThreeWayFanoutAfterSplit(t *testing.T) {
 	}
 }
 
+func TestFullDeliveryLegacyPrefixDispatchesArchitectureWriteWithProductPlanBag(t *testing.T) {
+	h := newFullDeliveryJSONHarness(t, "run_full_delivery_architecture_input")
+
+	requirementVersionID := createTestArtifactVersionInternal(t, h.ctx, h.doujiaGit, h.runID, "ceo", "requirement")
+	productPlanVersionID := createTestArtifactVersionInternal(t, h.ctx, h.doujiaGit, h.runID, "pm01", "product_plan")
+
+	feedbacks := []core.TaskMetaData{
+		{
+			Direction: core.TaskDirectionFeedback,
+			RunID:     h.runID,
+			TaskID:    "ceo_write_requirement",
+			AgentID:   "ceo",
+			Op:        core.TaskOpWritePlan,
+			Result:    core.TaskResultCodeOK,
+			Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{
+				Name:               "requirement",
+				ArtifactVersionIDs: []string{requirementVersionID},
+			}}},
+		},
+		{
+			Direction: core.TaskDirectionFeedback,
+			RunID:     h.runID,
+			TaskID:    "pm_write_product_plan",
+			AgentID:   "pm01",
+			Op:        core.TaskOpWritePlan,
+			Result:    core.TaskResultCodeOK,
+			Commit: &core.CommitReceipt{Result: core.TaskResultCodeOK, ProducedBags: []core.CommittedBagDef{{
+				Name:               "product_plan",
+				ArtifactVersionIDs: []string{productPlanVersionID},
+			}}},
+		},
+		{
+			Direction: core.TaskDirectionFeedback,
+			RunID:     h.runID,
+			TaskID:    "ceo_review_product_plan",
+			AgentID:   "ceo",
+			Op:        core.TaskOpReviewPlan,
+			Result:    core.TaskResultCodeOK,
+		},
+	}
+	for _, feedback := range feedbacks {
+		if err := h.service.OnFeedback(h.ctx, feedback); err != nil {
+			t.Fatalf("OnFeedback(%s) error = %v", feedback.TaskID, err)
+		}
+	}
+
+	task, err := h.taskRepo.Get(h.ctx, h.runID, "architect_write_architecture")
+	if err != nil {
+		t.Fatalf("Get(architect_write_architecture) error = %v", err)
+	}
+	if task.Status != core.TaskStatusDispatched {
+		t.Fatalf("architect_write_architecture status = %s, want dispatched", task.Status)
+	}
+	if len(task.InputBags) != 1 || task.InputBags[0].Name != "product_plan" {
+		t.Fatalf("architect_write_architecture input bags = %+v, want product_plan", task.InputBags)
+	}
+	if len(task.InputBagIDs) != 1 || task.InputBagIDs[0] == "" {
+		t.Fatalf("architect_write_architecture input bag ids = %v, want one non-empty product_plan bag", task.InputBagIDs)
+	}
+	lastDispatch := h.dispatcher.dispatched[len(h.dispatcher.dispatched)-1]
+	if lastDispatch.TaskID != "architect_write_architecture" || len(lastDispatch.InputBags) != 1 || lastDispatch.InputBags[0].Name != "product_plan" {
+		t.Fatalf("last dispatch = %+v, want architect_write_architecture with product_plan input bag", lastDispatch)
+	}
+}
+
 func TestLegacyTerminalSnapshotProjectionExposesRootInputBags(t *testing.T) {
 	ctx := context.Background()
 	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("testdata", "full_delivery", "pipeline_full_delivery.spec.json"))
@@ -638,6 +703,61 @@ func TestFullDeliveryJSONBackendGroupReturnsOnlyAfterAllModuleChildrenComplete(t
 	}
 }
 
+func TestStartPipelineControlPreservesIndexedCollectionInputBagAliases(t *testing.T) {
+	registrySpec, err := pipeline.LoadRegistrySpec(filepath.Join("testdata", "full_delivery", "pipeline_full_delivery.spec.json"))
+	if err != nil {
+		t.Fatalf("LoadRegistrySpec(full delivery) error = %v", err)
+	}
+	parentDef, ok := registrySpec.Pipeline("pipeline_full_delivery")
+	if !ok {
+		t.Fatal("pipeline_full_delivery definition missing")
+	}
+	called, ok := registrySpec.Pipeline("pipeline_backend_module_group")
+	if !ok {
+		t.Fatal("pipeline_backend_module_group definition missing")
+	}
+	transition, ok := findTransition(parentDef, "run_backend_module_group")
+	if !ok {
+		t.Fatal("run_backend_module_group transition missing")
+	}
+
+	parent := core.PipelineInstance{
+		ID:         "root",
+		RunID:      "run_control_index_alias",
+		PipelineID: "pipeline_full_delivery",
+		OutputBagIDs: map[string]string{
+			"backend_module_input": "bag_backend_module02",
+		},
+		OutputBagIDLists: map[string][]string{
+			"backend_module_input":                      {"bag_backend_module02"},
+			"backend_module_input[module_key=module02]": {"bag_backend_module02"},
+		},
+		AgentBindings: map[string]core.AgentID{
+			"coder":  "coder01",
+			"tester": "tester01",
+		},
+	}
+	control := core.Control{
+		Type:         core.ControlTypeStartPipeline,
+		TransitionID: "run_backend_module_group",
+		PipelineID:   "pipeline_backend_module_group",
+		InstanceKey:  "backend",
+		AgentBindings: map[string]core.AgentID{
+			"coder":  "coder01",
+			"tester": "tester01",
+		},
+		InputBags: map[string]string{"module_input": "backend_module_input"},
+	}
+
+	child, err := buildPipelineInstanceFromControl("run_control_index_alias", parent, transition, called, control)
+	if err != nil {
+		t.Fatalf("buildPipelineInstanceFromControl() error = %v", err)
+	}
+	if got := child.InputBagIDLists["module_input[module_key=module02]"]; !reflect.DeepEqual(got, []string{"bag_backend_module02"}) {
+		t.Fatalf("child input bag lists = %#v, want indexed module_input alias", child.InputBagIDLists)
+	}
+}
+
 func TestFullDeliveryJSONDispatchesMergeCodeAfterThreeBranchReturns(t *testing.T) {
 	h := newFullDeliveryJSONHarness(t, "run_full_delivery_merge_dispatch")
 	h.advanceToSplit(t)
@@ -646,8 +766,8 @@ func TestFullDeliveryJSONDispatchesMergeCodeAfterThreeBranchReturns(t *testing.T
 	globalTestData := h.childInstanceByParentAndPipeline(t, "root", "pipeline_global_test_data")
 
 	h.completeInstance(t, front, map[string][]string{
-		"tested_module[module_key=front]":   {"bag_front_tested"},
-		"code_bag[module_key=front]":        {"bag_front_code"},
+		"tested_module[module_key=front]":    {"bag_front_tested"},
+		"code_bag[module_key=front]":         {"bag_front_code"},
 		"preview_edit_bag[module_key=front]": {"bag_front_preview"},
 	})
 	h.completeInstance(t, globalTestData, map[string][]string{
@@ -667,12 +787,12 @@ func TestFullDeliveryJSONDispatchesMergeCodeAfterThreeBranchReturns(t *testing.T
 	mergeTask := h.taskByOp(t, core.TaskOpMergeCode)
 	gotBagNames := countTaskInputBagNames(mergeTask.InputBags)
 	wantBagNames := map[string]int{
-		"front_tested_module": 1,
+		"front_tested_module":   1,
 		"backend_tested_module": 2,
-		"front_code_bag": 1,
-		"backend_code_bag": 2,
-		"container_context": 1,
-		"global_test_input": 1,
+		"front_code_bag":        1,
+		"backend_code_bag":      2,
+		"container_context":     1,
+		"global_test_input":     1,
 	}
 	if !reflect.DeepEqual(gotBagNames, wantBagNames) {
 		t.Fatalf("merge task input bag names = %+v, want %+v; raw input bags = %+v", gotBagNames, wantBagNames, mergeTask.InputBags)
@@ -700,8 +820,8 @@ func TestFullDeliveryJSONDispatchesGlobalTestCodeAfterMergeReturn(t *testing.T) 
 	globalTask := h.taskByPipelineAndOp(t, globalTest.ID, core.TaskOpTestCode)
 	gotBagNames := countTaskInputBagNames(globalTask.InputBags)
 	wantBagNames := map[string]int{
-		"merged_code":      1,
-		"global_test_data": 1,
+		"merged_code":       1,
+		"global_test_data":  1,
 		"container_context": 1,
 	}
 	if !reflect.DeepEqual(gotBagNames, wantBagNames) {
@@ -771,10 +891,10 @@ func TestFullDeliveryJSONGlobalTestKbugDispatchesDebugAndRetries(t *testing.T) {
 	}
 	gotDebugBags := countTaskInputBagNames(debugTask.InputBags)
 	wantDebugBags := map[string]int{
-		"merged_code":      1,
-		"global_test_data": 1,
+		"merged_code":       1,
+		"global_test_data":  1,
 		"container_context": 1,
-		"failure_report":   1,
+		"failure_report":    1,
 	}
 	if !reflect.DeepEqual(gotDebugBags, wantDebugBags) {
 		t.Fatalf("debug task input bag names = %+v, want %+v; raw input bags = %+v", gotDebugBags, wantDebugBags, debugTask.InputBags)
@@ -803,8 +923,8 @@ func TestFullDeliveryJSONGlobalTestKbugDispatchesDebugAndRetries(t *testing.T) {
 	}
 	gotRetryBags := countTaskInputBagNames(retryTask.InputBags)
 	wantRetryBags := map[string]int{
-		"merged_code":      1,
-		"global_test_data": 1,
+		"merged_code":       1,
+		"global_test_data":  1,
 		"container_context": 1,
 	}
 	if !reflect.DeepEqual(gotRetryBags, wantRetryBags) {
@@ -948,10 +1068,10 @@ func TestFullDeliveryJSONRootOutputHandlerRepairsDeliveredGlobalTestChild(t *tes
 	debugTask := h.taskByPipelineAndOp(t, globalTest.ID, "debug_global_code")
 	gotDebugBags := countTaskInputBagNames(debugTask.InputBags)
 	wantDebugBags := map[string]int{
-		"merged_code":      1,
-		"global_test_data": 1,
+		"merged_code":       1,
+		"global_test_data":  1,
 		"container_context": 1,
-		"failure_report":   1,
+		"failure_report":    1,
 	}
 	if !reflect.DeepEqual(gotDebugBags, wantDebugBags) {
 		t.Fatalf("debug task input bag names = %+v, want %+v; raw input bags = %+v", gotDebugBags, wantDebugBags, debugTask.InputBags)
@@ -3175,6 +3295,59 @@ func TestResolveInputBagBindingObjectAcceptsCanonicalName(t *testing.T) {
 	}
 	if got != "bag_module01" {
 		t.Fatalf("resolveInputBagBinding() = %q, want bag_module01", got)
+	}
+}
+
+func TestLegacyOutputBagBindingsFromTaskTreatsForwardedReviewPlanBagAsOutput(t *testing.T) {
+	task := core.Task{
+		ID:          "ceo_review_product_plan",
+		StageID:     "ceo_review_product_plan",
+		Op:          core.TaskOpReviewPlan,
+		InputBagIDs: []string{"bag_product_plan_v1"},
+		InputBags: []core.BagBindingRef{
+			{Name: "product_plan", BagID: "bag_product_plan_v1"},
+		},
+		OutputBagIDs: []string{"bag_product_plan_v1"},
+	}
+
+	got := legacyOutputBagBindingsFromTask(task)
+	if len(got) != 1 || got[0].Name != "product_plan" || got[0].BagID != "bag_product_plan_v1" {
+		t.Fatalf("legacyOutputBagBindingsFromTask() = %+v, want forwarded product_plan binding", got)
+	}
+}
+
+func TestLegacyNextTaskInputBagsCanReadDeclaredForwardedReviewPlanOutput(t *testing.T) {
+	reviewTask := core.Task{
+		ID:          "ceo_review_product_plan",
+		StageID:     "ceo_review_product_plan",
+		Op:          core.TaskOpReviewPlan,
+		InputBagIDs: []string{"bag_product_plan_v1"},
+		InputBags: []core.BagBindingRef{
+			{Name: "product_plan", BagID: "bag_product_plan_v1"},
+		},
+		OutputBagIDs: []string{"bag_product_plan_v1"},
+	}
+
+	nextStage := pipeline.StageSpec{
+		ID:         "architect_write_architecture",
+		AgentRole:  core.AgentRoleArchitect,
+		AgentAlias: "architect01",
+		Op:         core.TaskOpWritePlan,
+		InputBags: []pipeline.BagSpec{
+			{Name: "product_plan"},
+		},
+	}
+
+	got := legacyNextTaskInputBags(nextStage, reviewTask, core.TaskMetaData{
+		Direction: core.TaskDirectionFeedback,
+		RunID:     "run_test",
+		TaskID:    reviewTask.ID,
+		AgentID:   "ceo",
+		Op:        reviewTask.Op,
+		Result:    core.TaskResultCodeOK,
+	}, []core.Task{reviewTask})
+	if len(got) != 1 || got[0].Name != "product_plan" || got[0].BagID != "bag_product_plan_v1" {
+		t.Fatalf("legacyNextTaskInputBags() = %+v, want forwarded product_plan binding", got)
 	}
 }
 

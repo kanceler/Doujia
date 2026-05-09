@@ -84,6 +84,12 @@ func TestNewBuiltinPluginRegistryBuildsDefaultRolesAndOps(t *testing.T) {
 	if _, ok := plugins.Ops().Get("architect", "merge_code"); !ok {
 		t.Fatal("architect.merge_code op missing")
 	}
+	if _, ok := plugins.Ops().Get("front", "preview_edit"); !ok {
+		t.Fatal("front.preview_edit op missing")
+	}
+	if _, ok := plugins.Ops().Get("front", "user_preview_confirm"); !ok {
+		t.Fatal("front.user_preview_confirm op missing")
+	}
 	if _, ok := plugins.Agents().Get("tester"); !ok {
 		t.Fatal("tester role missing")
 	}
@@ -204,23 +210,23 @@ func TestBuiltinSplitModuleOpResolvesModuleAndGlobalProducedBags(t *testing.T) {
 		t.Fatalf("split_module produced bags len = %d, want 3", len(bags))
 	}
 
-	module01, ok := findProducedBagByIndex(bags, "module_input", "module01")
+	module01, ok := findProducedBagByIndex(bags, "front_module_input", "module01")
 	if !ok {
-		t.Fatalf("split_module produced bags = %+v, want module01 module_input", bags)
+		t.Fatalf("split_module produced bags = %+v, want module01 front_module_input", bags)
 	}
 	if !hasProducedBagMember(module01.Members, core.LKContainerContext, "version:container", "") {
-		t.Fatalf("module01 module_input members = %+v, want container_context input passthrough", module01.Members)
+		t.Fatalf("module01 front_module_input members = %+v, want container_context input passthrough", module01.Members)
 	}
 	if !hasProducedBagMember(module01.Members, core.ModuleSpecKey("module01"), "", "projects/run/agents/architect01/artifacts/split_module/module_specs/module01_spec.json") {
-		t.Fatalf("module01 module_input members = %+v, want module01 spec output", module01.Members)
+		t.Fatalf("module01 front_module_input members = %+v, want module01 spec output", module01.Members)
 	}
 
-	module02, ok := findProducedBagByIndex(bags, "module_input", "module02")
+	module02, ok := findProducedBagByIndex(bags, "backend_module_input", "module02")
 	if !ok {
-		t.Fatalf("split_module produced bags = %+v, want module02 module_input", bags)
+		t.Fatalf("split_module produced bags = %+v, want module02 backend_module_input", bags)
 	}
 	if !hasProducedBagMember(module02.Members, core.ModuleSeedTestsKey("module02"), "", "projects/run/agents/architect01/artifacts/split_module/seed_tests/module02_seed_tests.json") {
-		t.Fatalf("module02 module_input members = %+v, want module02 seed tests output", module02.Members)
+		t.Fatalf("module02 backend_module_input members = %+v, want module02 seed tests output", module02.Members)
 	}
 
 	globalBag, ok := findProducedBag(bags, "global_test_input")

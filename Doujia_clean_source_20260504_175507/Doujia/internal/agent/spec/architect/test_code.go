@@ -13,7 +13,10 @@ func TestCodeSpec() core.OpSpec {
 		RoleDescription: "Architect agent that runs final global acceptance commands against the merged branch and produces delivery artifacts.",
 		OpDescription:   "Read container_context, merged_main_branch, global_test_data, global_acceptance_tests, and global_test_commands. Execute the real global acceptance commands in the merged repository and produce global_test_report.json and delivery_guide.md. Command execution failure is a normal test failure path, not an upstream issue.",
 		InputBags: []core.InputBagSpec{
-			{Name: "global_test_code_input", Required: true, Members: []core.BagMemberRequirement{{LogicalKey: core.LKContainerContext, Required: true}, {LogicalKey: core.LKMergedMainBranch, Required: true}, {LogicalKey: core.LKGlobalTestData, Required: true}, {LogicalKey: core.LKGlobalAcceptanceTests, Required: true}, {LogicalKey: core.LKGlobalTestCommands, Required: true}}},
+			{Name: "merged_code", Required: true, Members: []core.BagMemberRequirement{{LogicalKey: core.LKMergedMainBranch, Required: true}}},
+			{Name: "global_test_data", Required: true, Members: []core.BagMemberRequirement{{LogicalKey: core.LKGlobalTestData, Required: true}, {LogicalKey: core.LKGlobalAcceptanceTests, Required: true}, {LogicalKey: core.LKGlobalTestCommands, Required: true}}},
+			{Name: "container_context", Required: true, Members: []core.BagMemberRequirement{{LogicalKey: core.LKContainerContext, Required: true}}},
+			{Name: "global_test_code_input", Members: []core.BagMemberRequirement{{LogicalKey: core.LKContainerContext, Required: true}, {LogicalKey: core.LKMergedMainBranch, Required: true}, {LogicalKey: core.LKGlobalTestData, Required: true}, {LogicalKey: core.LKGlobalAcceptanceTests, Required: true}, {LogicalKey: core.LKGlobalTestCommands, Required: true}}},
 		},
 		OutputBags: []core.OutputBagSpec{
 			{Name: "global_test_report", Required: true, Members: []core.BagMemberRequirement{{LogicalKey: core.LKGlobalTestReport, Required: true}, {LogicalKey: core.LKDeliveryGuide, Required: true}, {LogicalKey: core.LKUpstreamArtifactIssue}}},

@@ -43,6 +43,7 @@ const (
 	LKBoundaryTests    = "boundary_tests"
 	LKFullTestFiles    = "full_test_files"
 	LKModuleTestReport = "module_test_report"
+	LKPreviewEdit      = "preview_edit"
 
 	LKModule01CoderBranch      = "module01_coder_branch"
 	LKModule01ModuleTestReport = "module01_module_test_report"
